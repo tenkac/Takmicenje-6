@@ -107,23 +107,29 @@ export default function Leaderboard({ allBets, onPlayerClick, isPlaying, onToggl
       const rows = allBets[player] || [];
       let totalScore = 0, winCount = 0, pendingCount = 0;
 
-      // Double-pick scoring & Sniper: both picks on a given day must win to multiply their odds
-      rows.forEach(r => {
-        if (r.match1?.status === 'win' && r.match2?.status === 'win') {
-          const combinedOdds = parseFloat((r.match1.odds * r.match2.odds).toFixed(2));
+      // Best-2-of-3 won odds: if 2 or 3 picks win on a ticket, multiply the 2 highest won odds
+      rows.forEach((r: any) => {
+        const wonLegs = [r.match1, r.match2, r.match3]
+          .filter((m): m is MatchItem => Boolean(m && m.status === 'win'))
+          .sort((a, b) => b.odds - a.odds);
+
+        if (wonLegs.length >= 2) {
+          const combinedOdds = parseFloat((wonLegs[0].odds * wonLegs[1].odds).toFixed(2));
           totalScore += combinedOdds;
 
           if (combinedOdds > biggestOdd.odds) {
             biggestOdd = {
               player,
               odds: combinedOdds,
-              match: `${r.match1.name} + ${r.match2.name}`
+              match: `${wonLegs[0].name} + ${wonLegs[1].name}`
             };
           }
         }
       });
 
-      const allMatches: MatchItem[] = rows.flatMap(r => [r.match1, r.match2]);
+      const allMatches: MatchItem[] = rows.flatMap((r: any) =>
+        [r.match1, r.match2, r.match3].filter((m): m is MatchItem => Boolean(m && m.status !== 'empty'))
+      );
 
       allMatches.forEach(m => {
         if (m.status === 'win') winCount++;
@@ -244,6 +250,7 @@ export default function Leaderboard({ allBets, onPlayerClick, isPlaying, onToggl
               {/* ── LEADER ANTHEM CONTROL PILL (SYNCED WITH page.tsx) ── */}
               {first && first.score > 0 && (
                 <button
+                  type="button"
                   onClick={onToggleMusic}
                   className="mt-3 inline-flex items-center gap-2 px-4 py-1.5 rounded-full text-[10px] font-black uppercase tracking-[0.2em] transition-all hover:brightness-110 active:scale-95 cursor-pointer"
                   style={{

@@ -191,7 +191,7 @@ export default function Statistics({ allBets, onBack }: Props) {
     return () => { document.body.style.overflow = 'unset'; };
   }, [isFullscreen]);
 
-  // ── DOUBLE-PICK PARLAY STATS & HISTORICAL STREAKS ──
+  // ── DOUBLE/TRIPLE-PICK PARLAY STATS & HISTORICAL STREAKS (BEST 2 OF 3 WON ODDS) ──
   const playerStats = useMemo(() => {
     const stats = PLAYERS.map(player => {
       const rows = allBets[player] || [];
@@ -202,11 +202,11 @@ export default function Statistics({ allBets, onBack }: Props) {
       let minSingleOdd = Infinity;
       let minSingleMatch = "";
 
-      // Daily double-ticket counters
+      // Daily ticket counters
       let totalScore = 0;
-      let perfectDays = 0;       // 2/2 wins
-      let oneOffDays = 0;        // 1 win + 1 loss (burned by one leg!)
-      let resolvedTickets = 0;   // tickets where both legs are resolved (no empty/pending)
+      let perfectDays = 0;       // Winning tickets (>= 2 won legs, top 2 multiplied)
+      let oneOffDays = 0;        // Resolved tickets with only 1 win
+      let resolvedTickets = 0;   // Tickets where all active legs are resolved
       let totalTicketOddsPlayed = 0;
       let playedTicketsCount = 0;
       let totalWonTicketOdds = 0;
@@ -215,40 +215,55 @@ export default function Statistics({ allBets, onBack }: Props) {
       let maxLossStreak = 0;
       let currentLossCount = 0;
 
-      rows.forEach(row => {
+      rows.forEach((row: any) => {
         const m1 = row.match1;
         const m2 = row.match2;
+        const m3 = row.match3;
         if (!m1 || !m2) return;
 
-        const hasBothPicks = m1.status !== 'empty' && m2.status !== 'empty';
-        if (hasBothPicks) {
-          totalTicketOddsPlayed += m1.odds * m2.odds;
-          playedTicketsCount++;
+        const hasJoker = Boolean(row.hasJoker || (m3 && m3.status !== 'empty'));
+        const candidateSlots = hasJoker ? [m1, m2, m3 ?? { status: 'empty', odds: 0 }] : [m1, m2];
+        const filledSlots = candidateSlots.filter((m: any) => m && m.status !== 'empty');
+        const expectedSlots = hasJoker ? 3 : 2;
+
+        if (filledSlots.length === expectedSlots) {
+          const aliveSorted = [...filledSlots]
+            .filter((m: any) => m.status === 'win' || m.status === 'pending')
+            .sort((a: any, b: any) => b.odds - a.odds);
+
+          if (aliveSorted.length >= 2) {
+            totalTicketOddsPlayed += aliveSorted[0].odds * aliveSorted[1].odds;
+            playedTicketsCount++;
+          }
         }
 
-        const isM1Resolved = m1.status === 'win' || m1.status === 'loss';
-        const isM2Resolved = m2.status === 'win' || m2.status === 'loss';
+        const isAllResolved =
+          filledSlots.length === expectedSlots &&
+          filledSlots.every((m: any) => m.status === 'win' || m.status === 'loss');
 
-        if (isM1Resolved && isM2Resolved) {
+        if (isAllResolved) {
           resolvedTickets++;
         }
 
-        if (m1.status === 'win' && m2.status === 'win') {
-          const comboOdds = parseFloat((m1.odds * m2.odds).toFixed(2));
+        const wonSorted = [...filledSlots]
+          .filter((m: any) => m.status === 'win')
+          .sort((a: any, b: any) => b.odds - a.odds);
+
+        if (wonSorted.length >= 2) {
+          const comboOdds = parseFloat((wonSorted[0].odds * wonSorted[1].odds).toFixed(2));
           totalScore += comboOdds;
           totalWonTicketOdds += comboOdds;
           perfectDays++;
-        } else if (
-          (m1.status === 'win' && m2.status === 'loss') ||
-          (m1.status === 'loss' && m2.status === 'win')
-        ) {
+        } else if (isAllResolved && wonSorted.length === 1) {
           oneOffDays++;
         }
       });
 
-      const allMatches = rows.flatMap(r => [r.match1, r.match2]).filter(m => m && m.status !== 'empty');
+      const allMatches = rows
+        .flatMap((r: any) => [r.match1, r.match2, r.match3])
+        .filter((m: any) => m && m.status !== 'empty');
 
-      allMatches.forEach(m => {
+      allMatches.forEach((m: any) => {
         if (m.odds < minSingleOdd) {
           minSingleOdd = m.odds;
           minSingleMatch = m.name;
@@ -259,9 +274,9 @@ export default function Statistics({ allBets, onBack }: Props) {
         }
       });
 
-      const chronologicalMatches = allMatches.filter(m => m.status === 'win' || m.status === 'loss');
+      const chronologicalMatches = allMatches.filter((m: any) => m.status === 'win' || m.status === 'loss');
 
-      chronologicalMatches.forEach(m => {
+      chronologicalMatches.forEach((m: any) => {
         if (m.status === 'loss') {
           currentLossCount++;
           if (currentLossCount > maxLossStreak) maxLossStreak = currentLossCount;
@@ -329,7 +344,7 @@ export default function Statistics({ allBets, onBack }: Props) {
   const boomMasters = playerStats.filter(s => s.isBoomMaster);
   const tragicari   = playerStats.filter(s => s.isTragicar);
 
-  // ── TIMELINE DATA (MULTIPLIED DAILY PARLAY POINTS) ──
+  // ── TIMELINE DATA (BEST-2-OF-3 WON ODDS MULTIPLIED) ──
   const timelineData = useMemo(() => {
     const allDates = [...new Set(PLAYERS.flatMap(p => (allBets[p] || []).map(r => r.date)))].sort();
     const running: Record<string, number> = {};
@@ -339,25 +354,26 @@ export default function Statistics({ allBets, onBack }: Props) {
       const point: any = { date: date.slice(5) };
 
       PLAYERS.forEach(player => {
-        const row = allBets[player]?.find(r => r.date === date);
+        const row: any = allBets[player]?.find(r => r.date === date);
         let dailyAdded = 0;
         let busted = false;
         const dailyDetails: string[] = [];
 
         if (row) {
-          const m1 = row.match1;
-          const m2 = row.match2;
+          const legs = [row.match1, row.match2, row.match3].filter((m: any) => m && m.status !== 'empty');
+          const wonSorted = [...legs]
+            .filter((m: any) => m.status === 'win')
+            .sort((a: any, b: any) => b.odds - a.odds);
 
-          if (m1?.status === 'win' && m2?.status === 'win') {
-            const combo = parseFloat((m1.odds * m2.odds).toFixed(2));
+          if (wonSorted.length >= 2) {
+            const combo = parseFloat((wonSorted[0].odds * wonSorted[1].odds).toFixed(2));
             running[player] += combo;
             dailyAdded = combo;
-          } else if (m1?.status === 'loss' || m2?.status === 'loss') {
+          } else if (legs.some((m: any) => m.status === 'loss') && wonSorted.length < 2) {
             busted = true;
           }
 
-          [m1, m2].forEach(m => {
-            if (!m || m.status === 'empty') return;
+          legs.forEach((m: any) => {
             if (m.status === 'win') {
               dailyDetails.push(`✅ ${m.name} (${m.odds.toFixed(2)})`);
             } else if (m.status === 'loss') {
@@ -387,13 +403,17 @@ export default function Statistics({ allBets, onBack }: Props) {
     }[] = [];
 
     PLAYERS.forEach(player => {
-      (allBets[player] || []).forEach(row => {
-        const m1 = row.match1;
-        const m2 = row.match2;
-        if (m1 && m2 && m1.status !== 'empty' && m2.status !== 'empty') {
+      (allBets[player] || []).forEach((row: any) => {
+        const legs = [row.match1, row.match2, row.match3].filter((m: any) => m && m.status !== 'empty');
+        const hasJoker = Boolean(row.hasJoker || (row.match3 && row.match3.status !== 'empty'));
+        const expectedCount = hasJoker ? 3 : 2;
+
+        if (legs.length === expectedCount) {
+          const sortedOdds = [...legs].map((m: any) => m.odds).sort((a: number, b: number) => b - a);
+          const pairProduct = parseFloat((sortedOdds[0] * sortedOdds[1]).toFixed(2));
           tickets.push({
             player,
-            combinedOdd: parseFloat((m1.odds * m2.odds).toFixed(2)),
+            combinedOdd: pairProduct,
           });
         }
       });
@@ -503,8 +523,8 @@ export default function Statistics({ allBets, onBack }: Props) {
 
         {/* ── FLOODLIGHTS ── */}
         <div className="fixed inset-0 pointer-events-none overflow-hidden">
-          <div className="wc-beam-l absolute" style={{ ...GPU_LAYER, top: 0, left: '15%', width: '280px', height: '70vh', background: 'linear-gradient(178deg, rgba(255,204,0,0.18) 0%, transparent 85%)', transformOrigin: 'top center', filter: 'blur(44px)' }} />
-          <div className="wc-beam-r absolute" style={{ ...GPU_LAYER, top: 0, right: '15%', width: '280px', height: '70vh', background: 'linear-gradient(178deg, rgba(255,204,0,0.18) 0%, transparent 85%)', transformOrigin: 'top center', filter: 'blur(44px)' }} />
+          <div className="wc-beam-l absolute" style={{ ...GPU_LAYER, top: 0, left: '15%', width: '280px', height: '70vh', background: 'linear-gradient(178deg, rgba(255,204,0,0.20) 0%, transparent 85%)', transformOrigin: 'top center', filter: 'blur(44px)' }} />
+          <div className="wc-beam-r absolute" style={{ ...GPU_LAYER, top: 0, right: '15%', width: '280px', height: '70vh', background: 'linear-gradient(178deg, rgba(255,204,0,0.20) 0%, transparent 85%)', transformOrigin: 'top center', filter: 'blur(44px)' }} />
           <div style={{ position: 'absolute', top: '-80px', left: '50%', transform: 'translateX(-50%)', width: '800px', height: '500px', background: 'radial-gradient(ellipse at top, rgba(255,204,0,0.10) 0%, transparent 65%)' }} />
           <div style={{ position: 'absolute', bottom: 0, left: '50%', transform: 'translateX(-50%)', width: '90vw', height: '32vh', background: 'radial-gradient(ellipse at bottom, rgba(239,68,68,0.10) 0%, transparent 70%)' }} />
         </div>
@@ -534,7 +554,7 @@ export default function Statistics({ allBets, onBack }: Props) {
 
           <div className="max-w-6xl mx-auto space-y-5">
 
-            {/* ── 1. PLAYER PERFORMANCE CARDS (PARLAY-AWARE) ── */}
+            {/* ── 1. PLAYER PERFORMANCE CARDS ── */}
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
               {playerStats.map((stat, idx) => {
                 const p = PLAYER_THEMES[stat.player];
@@ -582,7 +602,7 @@ export default function Statistics({ allBets, onBack }: Props) {
                       style={{ background: 'rgba(0, 8, 28, 0.55)', border: '1px solid rgba(255, 204, 0, 0.10)' }}
                     >
                       <div className="flex justify-between items-center border-b border-white/5 pb-1.5">
-                        <span className="text-[9px] text-gray-300/70 uppercase font-bold tracking-widest">Tiket 2/2 %</span>
+                        <span className="text-[9px] text-gray-300/70 uppercase font-bold tracking-widest">Tiket Dobitni %</span>
                         <span className={`font-black text-xs tabular-nums ${stat.ticketHitRate >= 35 ? 'text-green-400' : 'text-yellow-300'}`}>
                           {stat.ticketHitRate}% <span className="text-[8px] text-gray-400">({stat.perfectDays}/{stat.resolvedTickets})</span>
                         </span>
@@ -615,7 +635,6 @@ export default function Statistics({ allBets, onBack }: Props) {
 
             {/* ── 2. POPULARITY REACTION LEADERBOARDS ── */}
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              {/* MOST LIKED */}
               <div
                 className="p-4 rounded-3xl backdrop-blur-md relative overflow-hidden shadow-xl"
                 style={{ background: 'linear-gradient(135deg, rgba(239,68,68,0.16) 0%, rgba(0,12,46,0.65) 100%)', border: '1px solid rgba(239,68,68,0.25)' }}
@@ -645,7 +664,6 @@ export default function Statistics({ allBets, onBack }: Props) {
                 </div>
               </div>
 
-              {/* MOST DISLIKED */}
               <div
                 className="p-4 rounded-3xl backdrop-blur-md relative overflow-hidden shadow-xl"
                 style={{ background: 'linear-gradient(135deg, rgba(168,85,247,0.16) 0%, rgba(0,12,46,0.65) 100%)', border: '1px solid rgba(168,85,247,0.25)' }}
@@ -676,12 +694,12 @@ export default function Statistics({ allBets, onBack }: Props) {
               </div>
             </div>
 
-            {/* ── 3. TITLE RACE CHART (MULTIPLIED DAILY PARLAYS) ── */}
+            {/* ── 3. TITLE RACE CHART ── */}
             {mounted && timelineData.length > 0 && (
               <div className="p-4 rounded-3xl backdrop-blur-md shadow-xl" style={EU_CARD_STYLE}>
                 <div className="mb-4 flex justify-between items-center">
                   <div>
-                    <h3 className="text-[10px] font-black uppercase tracking-[0.25em] text-yellow-300/70">🎲 Kumulativni Bodovi (2/2)</h3>
+                    <h3 className="text-[10px] font-black uppercase tracking-[0.25em] text-yellow-300/70">🎲 Kumulativni Bodovi</h3>
                     <p className="text-lg font-black uppercase italic tracking-tighter leading-none mt-0.5">Trka za titulu</p>
                   </div>
                   <button
@@ -700,10 +718,9 @@ export default function Statistics({ allBets, onBack }: Props) {
               </div>
             )}
 
-            {/* ── 4. HISTORICAL ALL-TIME AWARDS (2x2 GRID ON DESKTOP) ── */}
+            {/* ── 4. HISTORICAL ALL-TIME AWARDS ── */}
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
 
-              {/* MAHER: MOST 2/2 DOUBLE-WIN DAYS */}
               <div
                 className="p-4 rounded-3xl backdrop-blur-md relative overflow-hidden shadow-xl"
                 style={{ background: 'linear-gradient(135deg, rgba(255,204,0,0.16) 0%, rgba(0,12,46,0.65) 100%)', border: '1px solid rgba(255,204,0,0.28)' }}
@@ -713,7 +730,7 @@ export default function Statistics({ allBets, onBack }: Props) {
                   <span className="text-2xl drop-shadow-lg">🚀</span>
                   <div>
                     <h3 className="text-sm font-black uppercase tracking-widest text-yellow-300 italic">Maher</h3>
-                    <p className="text-[9px] font-bold text-gray-300/60 uppercase tracking-widest">Najviše tiketa pogođenih (2/2)</p>
+                    <p className="text-[9px] font-bold text-gray-300/60 uppercase tracking-widest">Najviše dobitnih tiketa</p>
                   </div>
                 </div>
                 <div className="relative z-10">
@@ -735,7 +752,6 @@ export default function Statistics({ allBets, onBack }: Props) {
                 </div>
               </div>
 
-              {/* PAD NA JEDAN / BAKSUZ: MOST 1/2 HEARTBREAK DAYS */}
               <div
                 className="p-4 rounded-3xl backdrop-blur-md relative overflow-hidden shadow-xl"
                 style={{ background: 'linear-gradient(135deg, rgba(249,115,22,0.16) 0%, rgba(0,12,46,0.65) 100%)', border: '1px solid rgba(249,115,22,0.28)' }}
@@ -745,12 +761,12 @@ export default function Statistics({ allBets, onBack }: Props) {
                   <span className="text-2xl drop-shadow-lg">🧨</span>
                   <div>
                     <h3 className="text-sm font-black uppercase tracking-widest text-orange-300 italic">Baksuz</h3>
-                    <p className="text-[9px] font-bold text-gray-300/60 uppercase tracking-widest">Najviše puta 1/2 (Pad na Jedan)</p>
+                    <p className="text-[9px] font-bold text-gray-300/60 uppercase tracking-widest">Najviše puta 1 pogođen par (Pad)</p>
                   </div>
                 </div>
                 <div className="relative z-10">
                   {tragicari.length === 0 ? (
-                    <div className="text-center py-2 text-[9px] uppercase font-black tracking-widest text-gray-400/60">Nema padova na jedan par</div>
+                    <div className="text-center py-2 text-[9px] uppercase font-black tracking-widest text-gray-400/60">Nema padova</div>
                   ) : (
                     <div className="flex flex-wrap gap-2">
                       {tragicari.map(t => (
@@ -758,7 +774,7 @@ export default function Statistics({ allBets, onBack }: Props) {
                           <img src={PLAYER_THEMES[t.player].icon} alt={t.player} className="w-8 h-8 rounded-full border border-orange-400/50 shrink-0 object-cover" />
                           <div className="flex flex-col">
                             <span className="text-xs font-black text-white uppercase leading-none">{t.player}</span>
-                            <span className="text-[10px] font-black text-orange-300 mt-1">💀 {t.oneOffDays} puta 1/2</span>
+                            <span className="text-[10px] font-black text-orange-300 mt-1">💀 {t.oneOffDays} puta</span>
                           </div>
                         </div>
                       ))}
@@ -767,7 +783,6 @@ export default function Statistics({ allBets, onBack }: Props) {
                 </div>
               </div>
 
-              {/* RETARD: SMALLEST SINGLE PICK ODD */}
               <div
                 className="p-4 rounded-3xl backdrop-blur-md relative overflow-hidden shadow-xl"
                 style={{ background: 'linear-gradient(135deg, rgba(34,197,94,0.16) 0%, rgba(0,12,46,0.65) 100%)', border: '1px solid rgba(34,197,94,0.25)' }}
@@ -802,7 +817,6 @@ export default function Statistics({ allBets, onBack }: Props) {
                 </div>
               </div>
 
-              {/* ALL TIME LOSS STREAK PODIUM */}
               <div
                 className="p-4 rounded-3xl backdrop-blur-md relative overflow-hidden shadow-xl"
                 style={{ background: 'linear-gradient(135deg, rgba(168,85,247,0.16) 0%, rgba(0,12,46,0.65) 100%)', border: '1px solid rgba(168,85,247,0.25)' }}
@@ -836,7 +850,7 @@ export default function Statistics({ allBets, onBack }: Props) {
 
             </div>
 
-            {/* ── 5. WALL OF SHAME (NAME & COMBINED TICKET ODDS ONLY) ── */}
+            {/* ── 5. WALL OF SHAME ── */}
             <div
               className="p-4 rounded-3xl backdrop-blur-md relative overflow-hidden shadow-xl"
               style={{ background: 'linear-gradient(135deg, rgba(239,68,68,0.16) 0%, rgba(0,12,46,0.65) 100%)', border: '1px solid rgba(239,68,68,0.25)' }}
@@ -904,7 +918,7 @@ export default function Statistics({ allBets, onBack }: Props) {
           <div className="wc-ticker whitespace-nowrap inline-block">
             {[0, 1, 2, 3].map(i => (
               <span key={i} className="text-[10px] font-black uppercase tracking-[0.35em] text-yellow-400/35 px-2">
-                🎲 &nbsp;·&nbsp; 🇪🇺 EURO MODEL &nbsp;·&nbsp; STATISTIKA &nbsp;·&nbsp; 2/2 TIKETI &nbsp;·&nbsp; KOCKA JE BAČENA &nbsp;·&nbsp; TRKA ZA TITULU &nbsp;·&nbsp;
+                🎲 &nbsp;·&nbsp; 🇪🇺 EURO MODEL &nbsp;·&nbsp; STATISTIKA &nbsp;·&nbsp; DOBITNI TIKETI &nbsp;·&nbsp; KOCKA JE BAČENA &nbsp;·&nbsp; TRKA ZA TITULU &nbsp;·&nbsp;
               </span>
             ))}
           </div>

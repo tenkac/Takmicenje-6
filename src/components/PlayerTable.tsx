@@ -1,22 +1,31 @@
 "use client";
 import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { AllPlayersData, PLAYERS, MatchStatus } from '../types';
+import { AllPlayersData, PLAYERS, MatchStatus, EMPTY_MATCH } from '../types';
 import { betSchema } from '../utils/validation';
 import { AnimatePresence, motion, useMotionValue, animate } from 'framer-motion';
 import { supabase } from '../lib/supabase';
 import MatchComments from './MatchComments';
 import ReactionButtons from './ReactionButtons';
 
+export interface JokerGrantItem {
+  id?: number;
+  player_name: string;
+  grant_date: string;
+}
+
+type MatchSlotKey = "match1" | "match2" | "match3";
+
 interface Props {
   allBets: AllPlayersData;
   activePlayer: string;
   setActivePlayer: (player: string) => void;
   onAddPick: (date: string, sport: string, matchName: string, tip: string, odds: number) => void;
-  onToggleStatus: (date: string, matchKey: "match1" | "match2") => void;
+  onToggleStatus: (date: string, matchKey: MatchSlotKey) => void;
   userEmail?: string;
-  onDeletePick?: (date: string, playerName: string, matchKey: "match1" | "match2") => void;
+  onDeletePick?: (date: string, playerName: string, matchKey: MatchSlotKey) => void;
   selectedDate: Date;
   setSelectedDate: (date: Date) => void;
+  jokerGrants?: JokerGrantItem[];
 }
 
 const DICE_SRC = '/Kockabezzvijezda.webp';
@@ -51,34 +60,71 @@ function EuStarRing({ className, style, fontSize = 8 }: { className?: string; st
   );
 }
 
-function getTicketSummary(m1: any, m2: any) {
-  const hasM1 = m1 && m1.status !== 'empty';
-  const hasM2 = m2 && m2.status !== 'empty';
-  const hasAnyPick = hasM1 || hasM2;
-  const isComplete = hasM1 && hasM2;
+function getTicketSummary(row: any, hasJokerGrant = false) {
+  const m1 = row?.match1;
+  const m2 = row?.match2;
+  const m3 = row?.match3;
 
-  const combinedOdds = isComplete
-    ? parseFloat((m1.odds * m2.odds).toFixed(2))
-    : hasM1
-    ? parseFloat(m1.odds.toFixed(2))
-    : hasM2
-    ? parseFloat(m2.odds.toFixed(2))
-    : 0;
+  const hasJoker = Boolean(hasJokerGrant || row?.hasJoker || (m3 && m3.status !== 'empty'));
+  const maxSlots: 2 | 3 = hasJoker ? 3 : 2;
+  const slots = maxSlots === 3 ? [m1, m2, m3 ?? EMPTY_MATCH] : [m1, m2];
+
+  const filledPicks = slots.filter((m: any) => m && m.status !== 'empty');
+  const hasAnyPick = filledPicks.length > 0;
+  const isComplete = filledPicks.length === maxSlots;
+
+  const wonPicks = [...filledPicks].filter((m: any) => m.status === 'win').sort((a: any, b: any) => b.odds - a.odds);
+  const alivePicks = [...filledPicks]
+    .filter((m: any) => m.status === 'win' || m.status === 'pending')
+    .sort((a: any, b: any) => b.odds - a.odds);
 
   let ticketState: 'win' | 'loss' | 'pending' | 'incomplete' = 'incomplete';
-  if (isComplete) {
-    if (m1.status === 'win' && m2.status === 'win') ticketState = 'win';
-    else if (m1.status === 'loss' || m2.status === 'loss') ticketState = 'loss';
-    else ticketState = 'pending';
-  } else if (hasAnyPick) {
-    if (m1?.status === 'loss' || m2?.status === 'loss') ticketState = 'loss';
-    else ticketState = 'incomplete';
+  let earnedPoints = 0;
+  let oddsFormulaText = '';
+
+  if (wonPicks.length >= 2) {
+    ticketState = 'win';
+    earnedPoints = parseFloat((wonPicks[0].odds * wonPicks[1].odds).toFixed(2));
+    oddsFormulaText = `${wonPicks[0].odds.toFixed(2)} × ${wonPicks[1].odds.toFixed(2)} = ${earnedPoints.toFixed(2)}${maxSlots === 3 ? ' (Top 2/3)' : ''}`;
+  } else if (isComplete && alivePicks.length < 2) {
+    ticketState = 'loss';
+  } else if (isComplete) {
+    ticketState = 'pending';
+  } else {
+    ticketState = 'incomplete';
   }
 
-  const earnedPoints = ticketState === 'win' ? combinedOdds : 0;
-  const fakeTax = parseFloat((combinedOdds * 0.21).toFixed(2));
+  const potentialOdds =
+    alivePicks.length >= 2
+      ? parseFloat((alivePicks[0].odds * alivePicks[1].odds).toFixed(2))
+      : alivePicks.length === 1
+      ? parseFloat(alivePicks[0].odds.toFixed(2))
+      : 0;
 
-  return { hasAnyPick, isComplete, combinedOdds, ticketState, earnedPoints, fakeTax };
+  if (!oddsFormulaText) {
+    if (isComplete && maxSlots === 2 && m1 && m2) {
+      oddsFormulaText = `${m1.odds.toFixed(2)} × ${m2.odds.toFixed(2)} = ${potentialOdds.toFixed(2)}`;
+    } else if (isComplete && maxSlots === 3) {
+      oddsFormulaText = `Top 2 od 3 · Potencijal ${potentialOdds.toFixed(2)}`;
+    } else {
+      oddsFormulaText = `${potentialOdds.toFixed(2)} (${filledPicks.length}/${maxSlots} para)`;
+    }
+  }
+
+  const fakeTax = parseFloat(((ticketState === 'win' ? earnedPoints : potentialOdds) * 0.21).toFixed(2));
+
+  return {
+    hasAnyPick,
+    hasJoker,
+    maxSlots,
+    filledCount: filledPicks.length,
+    isComplete,
+    ticketState,
+    earnedPoints,
+    potentialOdds,
+    oddsFormulaText,
+    fakeTax,
+  };
 }
 
 export default function PlayerTable({
@@ -91,6 +137,7 @@ export default function PlayerTable({
   onDeletePick,
   selectedDate,
   setSelectedDate,
+  jokerGrants = [],
 }: Props) {
   const realTodayStr = new Date().toLocaleDateString('en-CA');
   const activeDateStr = (selectedDate ?? new Date()).toLocaleDateString('en-CA');
@@ -115,7 +162,7 @@ export default function PlayerTable({
   };
 
   const handleCarouselTouchMove = (e: React.TouchEvent) => {
-    e.stopPropagation(); // keeps PullToRefresh from firing while swiping players horizontally
+    e.stopPropagation();
     const el = carouselRef.current;
     if (!el) return;
 
@@ -200,8 +247,16 @@ export default function PlayerTable({
     if (rows && rows.length > 0) {
       const sortedRows = [...rows].sort((a, b) => a.date.localeCompare(b.date));
       const lastRow = sortedRows[sortedRows.length - 1];
+      const hasJoker =
+        Boolean(lastRow.hasJoker) ||
+        jokerGrants.some(g => g.player_name === activePlayer && g.grant_date === lastRow.date);
 
-      if (lastRow.match1.status === "empty" || lastRow.match2.status === "empty") {
+      const missingPick =
+        lastRow.match1?.status === "empty" ||
+        lastRow.match2?.status === "empty" ||
+        (hasJoker && (!lastRow.match3 || lastRow.match3.status === "empty"));
+
+      if (missingPick) {
         targetDate = lastRow.date;
       } else {
         const [year, month, day] = lastRow.date.split('-').map(Number);
@@ -217,7 +272,7 @@ export default function PlayerTable({
     }
 
     setForm(prev => ({ ...prev, date: targetDate }));
-  }, [allBets, activePlayer]);
+  }, [allBets, activePlayer, jokerGrants]);
 
   useEffect(() => {
     setMounted(false);
@@ -248,8 +303,16 @@ export default function PlayerTable({
     const userRowForDate = allBets[loggedInPlayerName]?.find(r => r.date === targetDate);
     if (!userRowForDate) return false;
 
-    return userRowForDate.match1.status !== 'empty' && userRowForDate.match2.status !== 'empty';
-  }, [allBets, loggedInPlayerName, userEmail]);
+    const hasJoker =
+      Boolean(userRowForDate.hasJoker) ||
+      jokerGrants.some(g => g.player_name === loggedInPlayerName && g.grant_date === targetDate);
+
+    const m1Ok = userRowForDate.match1?.status !== 'empty';
+    const m2Ok = userRowForDate.match2?.status !== 'empty';
+    const m3Ok = !hasJoker || (userRowForDate.match3 && userRowForDate.match3.status !== 'empty');
+
+    return Boolean(m1Ok && m2Ok && m3Ok);
+  }, [allBets, loggedInPlayerName, userEmail, jokerGrants]);
 
   const handleAdd = async () => {
     if (isSubmitting) return;
@@ -263,7 +326,7 @@ export default function PlayerTable({
     finally { setTimeout(() => setIsSubmitting(false), 1000); }
   };
 
-  const handleToggle = useCallback((date: string, playerKey: string, matchKey: "match1" | "match2") => {
+  const handleToggle = useCallback((date: string, playerKey: string, matchKey: MatchSlotKey) => {
     if (editingCardKey) return;
 
     const cardKey = `${date}-${playerKey}-${matchKey}`;
@@ -290,7 +353,7 @@ export default function PlayerTable({
     onToggleStatus(date, matchKey);
   }, [allBets, onToggleStatus, editingCardKey]);
 
-  const executeDirectDbUpdate = async (date: string, matchKey: "match1" | "match2", customValueObj: any) => {
+  const executeDirectDbUpdate = async (date: string, matchKey: MatchSlotKey, customValueObj: any) => {
     const cleanPlayerName = activePlayer.trim();
     try {
       const { data, error: fetchErr } = await supabase
@@ -304,7 +367,8 @@ export default function PlayerTable({
       const currentBetsArray = Array.isArray(data.bets) ? data.bets : [];
       const updatedBetsArray = currentBetsArray.map((ticket: any) => {
         if (ticket.date === date) {
-          return { ...ticket, [matchKey]: { ...ticket[matchKey], ...customValueObj } };
+          const baseMatch = ticket[matchKey] || { ...EMPTY_MATCH };
+          return { ...ticket, [matchKey]: { ...baseMatch, ...customValueObj } };
         }
         return ticket;
       });
@@ -327,7 +391,7 @@ export default function PlayerTable({
     }
   };
 
-  const handleDeleteClick = async (e: React.MouseEvent, date: string, matchKey: "match1" | "match2") => {
+  const handleDeleteClick = async (e: React.MouseEvent, date: string, matchKey: MatchSlotKey) => {
     e.stopPropagation();
     const confirmed = window.confirm(`Da li sigurno želiš da obrišeš ovaj par (${activePlayer} - ${date})?`);
     if (!confirmed) return;
@@ -340,13 +404,13 @@ export default function PlayerTable({
     }
   };
 
-  const handleEditClick = (e: React.MouseEvent, date: string, matchKey: "match1" | "match2", matchObject: any) => {
+  const handleEditClick = (e: React.MouseEvent, date: string, matchKey: MatchSlotKey, matchObject: any) => {
     e.stopPropagation();
     setEditingCardKey(`${date}-${matchKey}`);
     setEditForm({ name: matchObject.name, tip: matchObject.tip, odds: matchObject.odds.toString() });
   };
 
-  const handleSaveEdit = async (e: React.FormEvent, date: string, matchKey: "match1" | "match2") => {
+  const handleSaveEdit = async (e: React.FormEvent, date: string, matchKey: MatchSlotKey) => {
     e.stopPropagation();
     const parsedOdds = parseFloat(editForm.odds);
     if (isNaN(parsedOdds) || parsedOdds <= 0) return alert("Unesite ispravnu kvotu!");
@@ -370,21 +434,24 @@ export default function PlayerTable({
   };
 
   const groupedMatchdayPicks = React.useMemo(() => {
-    const groups: Record<string, { rowId: number; match1: any; match2: any; picks: any[] }> = {};
+    const groups: Record<string, { row: any; picks: any[] }> = {};
     let totalCount = 0;
 
     PLAYERS.forEach(player => {
       const todayRow = allBets[player]?.find(r => r.date === realTodayStr);
       if (todayRow) {
-        const picks: any[] = [];
-        if (todayRow.match1.status !== 'empty') picks.push({ match: todayRow.match1, matchKey: 'match1', rowId: todayRow.id });
-        if (todayRow.match2.status !== 'empty') picks.push({ match: todayRow.match2, matchKey: 'match2', rowId: todayRow.id });
+        const hasJoker =
+          Boolean(todayRow.hasJoker) ||
+          jokerGrants.some(g => g.player_name === player && g.grant_date === realTodayStr);
 
-        if (picks.length > 0) {
+        const picks: any[] = [];
+        if (todayRow.match1?.status !== 'empty') picks.push({ match: todayRow.match1, matchKey: 'match1' as MatchSlotKey, rowId: todayRow.id });
+        if (todayRow.match2?.status !== 'empty') picks.push({ match: todayRow.match2, matchKey: 'match2' as MatchSlotKey, rowId: todayRow.id });
+        if (todayRow.match3?.status !== 'empty') picks.push({ match: todayRow.match3, matchKey: 'match3' as MatchSlotKey, rowId: todayRow.id });
+
+        if (picks.length > 0 || hasJoker) {
           groups[player] = {
-            rowId: todayRow.id,
-            match1: todayRow.match1,
-            match2: todayRow.match2,
+            row: todayRow,
             picks,
           };
           totalCount += picks.length;
@@ -392,7 +459,7 @@ export default function PlayerTable({
       }
     });
     return { groups, totalCount };
-  }, [allBets, realTodayStr]);
+  }, [allBets, realTodayStr, jokerGrants]);
 
   // Compact betting slip leg inside the daily ticket
   const renderTicketLeg = ({
@@ -407,7 +474,7 @@ export default function PlayerTable({
     date: string;
     playerKey: string;
     match: any;
-    matchKey: "match1" | "match2";
+    matchKey: MatchSlotKey;
     legIndex: number;
     canToggle: boolean;
     canAdminEdit: boolean;
@@ -472,11 +539,11 @@ export default function PlayerTable({
             </div>
           </div>
         ) : isEmpty ? (
-          <div className="flex flex-col items-center justify-center h-full py-2 text-center opacity-50">
-            <span className="text-[8px] font-black uppercase tracking-[0.2em] text-yellow-200/60">
-              PAR {legIndex + 1} · PRAZAN SLOT
+          <div className="flex flex-col items-center justify-center h-full py-2 text-center opacity-60">
+            <span className="text-[8px] font-black uppercase tracking-[0.2em] text-yellow-300/80">
+              {matchKey === 'match3' ? '🃏 JOKER PAR 3' : `PAR ${legIndex + 1} · PRAZAN SLOT`}
             </span>
-            <span className="text-[7px] font-bold uppercase tracking-widest text-white/30 mt-0.5">
+            <span className="text-[7px] font-bold uppercase tracking-widest text-white/35 mt-0.5">
               Čeka se unos meča
             </span>
           </div>
@@ -485,7 +552,7 @@ export default function PlayerTable({
             <div className="flex justify-between items-center gap-1.5 mb-1 relative z-10">
               <span className="text-[8px] font-black text-yellow-300/75 uppercase tracking-wider flex items-center gap-1">
                 <span>{match.sport || "⚽"}</span>
-                <span>PAR {legIndex + 1}</span>
+                <span>{matchKey === 'match3' ? '🃏 PAR 3 (JOKER)' : `PAR ${legIndex + 1}`}</span>
               </span>
 
               <div className="flex items-center gap-1 relative z-30 shrink-0">
@@ -691,9 +758,9 @@ export default function PlayerTable({
               >
                 {/* LEFT COLUMN: ADD PICK FORM (ONLY SHOWN FOR OWNER/ADMIN) */}
                 {isOwner && (
-                  <div className="flex flex-col gap-4 lg:sticky lg:top-[136px] lg:self-start">
+                  <div className="flex flex-col gap-4 lg:sticky lg:top-[136px] lg:self-start min-w-0">
                     <div
-                      className="p-4 rounded-2xl shadow-xl flex flex-col gap-2.5 backdrop-blur-md"
+                      className="p-4 rounded-2xl shadow-xl flex flex-col gap-2.5 backdrop-blur-md overflow-hidden min-w-0"
                       style={{
                         background: 'linear-gradient(155deg, rgba(0, 26, 88, 0.72) 0%, rgba(1, 10, 34, 0.88) 100%)',
                         border: '1px solid rgba(255, 204, 0, 0.25)',
@@ -717,15 +784,15 @@ export default function PlayerTable({
                           setForm({ ...form, date: e.target.value });
                           setSelectedDate(new Date(e.target.value));
                         }}
-                        className="w-full h-[38px] rounded-xl px-3 text-xs font-bold text-white outline-none"
-                        style={{ background: 'rgba(0, 8, 28, 0.75)', border: '1px solid rgba(255, 204, 0, 0.18)' }}
+                        className="w-full min-w-0 max-w-full box-border appearance-none h-[38px] rounded-xl px-3 text-xs font-bold text-white outline-none block"
+                        style={{ background: 'rgba(0, 8, 28, 0.75)', border: '1px solid rgba(255, 204, 0, 0.18)', colorScheme: 'dark' }}
                       />
 
                       <input
                         placeholder="Naziv meča (npr. Real - Bayern)"
                         value={form.matchName}
                         onChange={e => setForm({ ...form, matchName: e.target.value })}
-                        className="w-full h-[38px] rounded-xl px-3 text-xs font-bold text-white placeholder-white/25 outline-none"
+                        className="w-full min-w-0 max-w-full box-border h-[38px] rounded-xl px-3 text-xs font-bold text-white placeholder-white/25 outline-none"
                         style={{ background: 'rgba(0, 8, 28, 0.75)', border: '1px solid rgba(255, 204, 0, 0.18)' }}
                       />
 
@@ -734,7 +801,7 @@ export default function PlayerTable({
                           placeholder="Tip (Npr. GG)"
                           value={form.tip}
                           onChange={e => setForm({ ...form, tip: e.target.value })}
-                          className="w-full h-[38px] rounded-xl px-2.5 text-xs font-black text-center text-white placeholder-white/25 outline-none"
+                          className="w-full min-w-0 box-border h-[38px] rounded-xl px-2.5 text-xs font-black text-center text-white placeholder-white/25 outline-none"
                           style={{ background: 'rgba(0, 8, 28, 0.75)', border: '1px solid rgba(255, 204, 0, 0.18)' }}
                         />
                         <input
@@ -742,7 +809,7 @@ export default function PlayerTable({
                           placeholder="Kvota"
                           value={form.odds}
                           onChange={e => setForm({ ...form, odds: e.target.value })}
-                          className="w-full h-[38px] rounded-xl px-2.5 text-xs text-center font-black text-white placeholder-white/25 outline-none tabular-nums"
+                          className="w-full min-w-0 box-border h-[38px] rounded-xl px-2.5 text-xs text-center font-black text-white placeholder-white/25 outline-none tabular-nums"
                           style={{ background: 'rgba(0, 8, 28, 0.75)', border: '1px solid rgba(255, 204, 0, 0.18)' }}
                         />
                       </div>
@@ -763,7 +830,7 @@ export default function PlayerTable({
                 )}
 
                 {/* RIGHT / MAIN COLUMN: COMPACT DAILY BETTING SLIP TICKETS */}
-                <div className="space-y-3.5">
+                <div className="space-y-3.5 min-w-0">
                   {(!allBets[activePlayer] || allBets[activePlayer].length === 0) ? (
                     <div
                       className="p-10 text-center text-xs font-black uppercase tracking-widest text-yellow-200/40 rounded-2xl backdrop-blur-md"
@@ -779,7 +846,27 @@ export default function PlayerTable({
                         const isToday = row.date === realTodayStr;
                         const isFuture = row.date > realTodayStr;
                         const isRowHidden = !isOwner && !hasUserUnlockedDate(row.date);
-                        const { hasAnyPick, isComplete, combinedOdds, ticketState, earnedPoints, fakeTax } = getTicketSummary(row.match1, row.match2);
+                        const hasJokerGrant = jokerGrants.some(
+                          g => g.player_name === activePlayer && g.grant_date === row.date
+                        );
+                        const {
+                          hasAnyPick,
+                          hasJoker,
+                          maxSlots,
+                          filledCount,
+                          isComplete,
+                          ticketState,
+                          earnedPoints,
+                          potentialOdds,
+                          oddsFormulaText,
+                          fakeTax,
+                        } = getTicketSummary(row, hasJokerGrant);
+
+                        const ticketSlots: { match: any; key: MatchSlotKey }[] = [
+                          { match: row.match1, key: "match1" },
+                          { match: row.match2, key: "match2" },
+                          ...(hasJoker ? [{ match: row.match3 ?? { ...EMPTY_MATCH }, key: "match3" as MatchSlotKey }] : []),
+                        ];
 
                         const ticketBorder =
                           ticketState === 'win'
@@ -809,14 +896,16 @@ export default function PlayerTable({
                                 borderBottom: '1px dashed rgba(255, 204, 0, 0.22)',
                               }}
                             >
-                              <div className="flex items-center gap-2.5">
+                              <div className="flex items-center gap-2 flex-wrap">
                                 <span className="text-xs">🎟️</span>
-                                <div className="flex items-baseline gap-2">
-                                  <span className="text-xs font-black text-white tracking-wider tabular-nums">
-                                    {row.date.split('-').reverse().join('.')}
+                                <span className="text-xs font-black text-white tracking-wider tabular-nums">
+                                  {row.date.split('-').reverse().join('.')}
+                                </span>
+                                {hasJoker && (
+                                  <span className="text-[8px] font-black uppercase tracking-widest px-1.5 py-0.5 bg-purple-500/20 text-purple-300 rounded-full border border-purple-400/40 leading-none">
+                                    🃏 JOKER (3)
                                   </span>
-                                </div>
-
+                                )}
                                 {isToday && (
                                   <span className="text-[8px] font-black uppercase tracking-widest px-1.5 py-0.5 bg-yellow-400/15 text-yellow-300 rounded-full border border-yellow-400/35 leading-none">
                                     Danas
@@ -843,7 +932,7 @@ export default function PlayerTable({
 
                                   {ticketState === 'win' && (
                                     <span className="text-[8px] font-black uppercase tracking-widest px-2 py-0.5 rounded-full bg-green-500/20 text-green-300 border border-green-400/40">
-                                      ✅ DOBITAN (2/2)
+                                      ✅ DOBITAN
                                     </span>
                                   )}
                                   {ticketState === 'loss' && (
@@ -853,34 +942,34 @@ export default function PlayerTable({
                                   )}
                                   {ticketState === 'pending' && (
                                     <span className="text-[8px] font-black uppercase tracking-widest px-2 py-0.5 rounded-full bg-blue-500/20 text-blue-200 border border-blue-400/30">
-                                      ⏳ AKTIVAN (2/2)
+                                      ⏳ AKTIVAN ({maxSlots}/{maxSlots})
                                     </span>
                                   )}
                                   {ticketState === 'incomplete' && (
                                     <span className="text-[8px] font-black uppercase tracking-widest px-2 py-0.5 rounded-full bg-yellow-400/10 text-yellow-300/80 border border-yellow-400/25">
-                                      ⚠️ NEPOTPUN (1/2)
+                                      ⚠️ NEPOTPUN ({filledCount}/{maxSlots})
                                     </span>
                                   )}
                                 </div>
                               )}
                             </div>
 
-                            {/* ── COMPACT TICKET BODY (2 LEGS) ── */}
+                            {/* ── COMPACT TICKET BODY (2 OR 3 LEGS) ── */}
                             <div className="p-3 md:p-3.5">
                               {isRowHidden ? (
                                 <div className="flex items-center justify-center p-5 bg-black/40 border border-yellow-400/15 rounded-xl border-dashed">
                                   <span className="text-[9px] font-black text-yellow-200/55 uppercase tracking-[0.2em] flex items-center gap-2 text-center">
-                                    🔒 Zaključano dok ne popuniš oba para na svom tiketu za ovaj datum
+                                    🔒 Zaključano dok ne popuniš svoj tiket za ovaj datum
                                   </span>
                                 </div>
                               ) : (
-                                <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5">
-                                  {[row.match1, row.match2].map((m, idx) =>
+                                <div className={`grid grid-cols-1 ${maxSlots === 3 ? 'md:grid-cols-3' : 'md:grid-cols-2'} gap-2.5`}>
+                                  {ticketSlots.map((slot, idx) =>
                                     renderTicketLeg({
                                       date: row.date,
                                       playerKey: activePlayer,
-                                      match: m,
-                                      matchKey: idx === 0 ? "match1" : "match2",
+                                      match: slot.match,
+                                      matchKey: slot.key,
                                       legIndex: idx,
                                       canToggle: Boolean(isOwner),
                                       canAdminEdit: isAdmin,
@@ -912,9 +1001,7 @@ export default function PlayerTable({
                                   <div className="flex items-center gap-1.5 text-[9px] font-black uppercase tracking-widest text-white/50">
                                     <span>Kvota:</span>
                                     <span className="text-xs font-black text-yellow-300 tabular-nums">
-                                      {isComplete
-                                        ? `${row.match1.odds.toFixed(2)} × ${row.match2.odds.toFixed(2)} = ${combinedOdds.toFixed(2)}`
-                                        : `${combinedOdds.toFixed(2)} (čeka 2. par)`}
+                                      {oddsFormulaText}
                                     </span>
                                   </div>
 
@@ -933,11 +1020,11 @@ export default function PlayerTable({
                                         </span>
                                       ) : (
                                         <span className="text-[11px] font-black text-yellow-200/70 tabular-nums">
-                                          Potencijalno {combinedOdds.toFixed(2)} pts
+                                          Potencijalno {potentialOdds.toFixed(2)} pts
                                         </span>
                                       )}
                                     </div>
-                                    {combinedOdds > 0 && (
+                                    {(ticketState === 'win' ? earnedPoints : potentialOdds) > 0 && (
                                       <span className="text-[8px] font-bold uppercase tracking-wider text-white/30 tabular-nums mt-0.5">
                                         Porez (21%): -{fakeTax.toFixed(2)} pts
                                       </span>
@@ -979,7 +1066,7 @@ export default function PlayerTable({
                     <span className="text-2xl">🔒</span>
                     <h3 className="text-xs font-black text-yellow-300 uppercase tracking-wider">Pregled je zaključan!</h3>
                     <p className="text-[10px] font-black text-white/55 uppercase tracking-widest leading-relaxed max-w-sm mx-auto">
-                      Moraš unijeti oba svoja para za danas prije nego što dobiješ dozvolu da vidiš tikete ostatka grupe.
+                      Moraš unijeti sve svoje parove za danas prije nego što dobiješ dozvolu da vidiš tikete ostatka grupe.
                     </p>
                   </div>
                 ) : Object.keys(groupedMatchdayPicks.groups).length === 0 ? (
@@ -992,7 +1079,21 @@ export default function PlayerTable({
                 ) : (
                   Object.entries(groupedMatchdayPicks.groups).map(([player, group]) => {
                     const userTheme = PLAYER_THEMES[player];
-                    const { isComplete, combinedOdds, ticketState, earnedPoints, fakeTax } = getTicketSummary(group.match1, group.match2);
+                    const hasJokerGrant = jokerGrants.some(
+                      g => g.player_name === player && g.grant_date === realTodayStr
+                    );
+                    const {
+                      hasJoker,
+                      maxSlots,
+                      filledCount,
+                      ticketState,
+                      earnedPoints,
+                      potentialOdds,
+                      oddsFormulaText,
+                      fakeTax,
+                    } = getTicketSummary(group.row, hasJokerGrant);
+
+                    const displayOdds = ticketState === 'win' ? earnedPoints : potentialOdds;
 
                     return (
                       <div
@@ -1016,9 +1117,16 @@ export default function PlayerTable({
                               <img src={userTheme.icon} className="w-full h-full object-cover" alt={player} />
                             </div>
                             <div>
-                              <h3 className={`text-xs font-black uppercase tracking-wider leading-none ${userTheme.text}`}>{player}</h3>
+                              <div className="flex items-center gap-1.5">
+                                <h3 className={`text-xs font-black uppercase tracking-wider leading-none ${userTheme.text}`}>{player}</h3>
+                                {hasJoker && (
+                                  <span className="text-[7px] font-black uppercase px-1.5 py-0.5 rounded-full bg-purple-500/20 text-purple-300 border border-purple-400/40 leading-none">
+                                    🃏 JOKER
+                                  </span>
+                                )}
+                              </div>
                               <span className="text-[8px] font-bold text-yellow-300/60 uppercase tracking-[0.2em] block mt-0.5">
-                                🎟️ Današnji Tiket · {group.picks.length}/2
+                                🎟️ Današnji Tiket · {filledCount}/{maxSlots}
                               </span>
                             </div>
                           </div>
@@ -1026,7 +1134,7 @@ export default function PlayerTable({
                           <div className="flex items-center gap-2.5">
                             <ReactionButtons
                               targetPlayer={player}
-                              bettingRowId={group.rowId}
+                              bettingRowId={group.row.id}
                               matchKey={"ticket" as any}
                               loggedInPlayer={loggedInPlayerName || "Admin"}
                             />
@@ -1036,20 +1144,24 @@ export default function PlayerTable({
                                 Kvota
                               </span>
                               <span className="text-xs font-black text-yellow-300 tabular-nums">
-                                {combinedOdds.toFixed(2)}
+                                {displayOdds.toFixed(2)}
                               </span>
                             </div>
                           </div>
                         </div>
 
                         {/* Ticket Legs */}
-                        <div className="p-3 md:p-3.5 grid grid-cols-1 md:grid-cols-2 gap-2.5">
-                          {[group.match1, group.match2].map((m, idx) =>
+                        <div className={`p-3 md:p-3.5 grid grid-cols-1 ${maxSlots === 3 ? 'md:grid-cols-3' : 'md:grid-cols-2'} gap-2.5`}>
+                          {[
+                            { match: group.row.match1, key: 'match1' as MatchSlotKey },
+                            { match: group.row.match2, key: 'match2' as MatchSlotKey },
+                            ...(hasJoker ? [{ match: group.row.match3 ?? { ...EMPTY_MATCH }, key: 'match3' as MatchSlotKey }] : []),
+                          ].map((slot, idx) =>
                             renderTicketLeg({
                               date: realTodayStr,
                               playerKey: player,
-                              match: m,
-                              matchKey: idx === 0 ? "match1" : "match2",
+                              match: slot.match,
+                              matchKey: slot.key,
                               legIndex: idx,
                               canToggle: false,
                               canAdminEdit: false,
@@ -1075,7 +1187,7 @@ export default function PlayerTable({
                             }}
                           >
                             <span className="text-white/45">
-                              {isComplete ? `${group.match1.odds.toFixed(2)} × ${group.match2.odds.toFixed(2)}` : 'Čeka drugi par'}
+                              {oddsFormulaText}
                             </span>
                             <div className="flex flex-col items-end">
                               {ticketState === 'win' ? (
@@ -1083,9 +1195,9 @@ export default function PlayerTable({
                               ) : ticketState === 'loss' ? (
                                 <span className="text-red-400">❌ 0.00 pts</span>
                               ) : (
-                                <span className="text-yellow-200/70">Potencijalno {combinedOdds.toFixed(2)} pts</span>
+                                <span className="text-yellow-200/70">Potencijalno {potentialOdds.toFixed(2)} pts</span>
                               )}
-                              {combinedOdds > 0 && (
+                              {displayOdds > 0 && (
                                 <span className="text-[8px] font-bold text-white/30 tabular-nums mt-0.5">
                                   Porez (21%): -{fakeTax.toFixed(2)} pts
                                 </span>
@@ -1101,7 +1213,7 @@ export default function PlayerTable({
                             }}
                           >
                             <MatchComments
-                              bettingRowId={group.rowId}
+                              bettingRowId={group.row.id}
                               loggedInPlayer={loggedInPlayerName || "Admin"}
                             />
                           </div>

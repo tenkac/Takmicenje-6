@@ -15,6 +15,8 @@ export interface BettingRow {
   date: string;
   match1: Match;
   match2: Match;
+  match3?: Match;       // Optional 3rd safety pick
+  hasJoker?: boolean;   // Marks that the Admin granted the 3rd pick on this ticket
 }
 
 export interface AllPlayersData {

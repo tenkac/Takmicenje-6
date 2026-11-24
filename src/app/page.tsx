@@ -11,11 +11,19 @@ import { supabase } from "../lib/supabase";
 
 const Statistics = dynamic(() => import("../components/Statistics"), { ssr: false });
 
-type AppView = "landing" | "leaderboard" | "tables" | "statistics";
+type AppView = "landing" | "leaderboard" | "tables" | "statistics" | "admin";
+
+export interface JokerGrant {
+  id: number;
+  player_name: string;
+  grant_date: string;
+}
+
+const ADMIN_EMAIL = "vladoadmin@takmicenje.com";
 
 const LEADER_SONGS: Record<string, { song: string; icon: string }> = {
   "Vlado": { song: "/Music/vlado.mp3", icon: "/Avatars/vlado.webp" },
-  "Fika":  { song: "/Music/fika.mp3",  icon: "/Avatars/fika.webp" },
+  "Fika":  { song: "/Music/fika1.mp3", icon: "/Avatars/fika.webp" },
   "Labud": { song: "/Music/labud.mp3", icon: "/Avatars/labud.webp" },
   "Ilija": { song: "/Music/ilija.mp3", icon: "/Avatars/ilija.webp" },
   "Dzoni": { song: "/Music/dzoni.mp3", icon: "/Avatars/dzoni.webp" },
@@ -38,25 +46,69 @@ function EuStarRing({ className, fontSize = 9 }: { className?: string; fontSize?
   );
 }
 
+// Helper: evaluates 2-pick or 3-pick ("best 2 won odds") ticket score
+export function calculateRowScore(row: BettingRow): number {
+  const candidates = [row.match1, row.match2, row.match3].filter(
+    (m): m is Match => Boolean(m && m.status === "win")
+  );
+  if (candidates.length < 2) return 0;
+
+  const sortedByOdds = [...candidates].sort((a, b) => b.odds - a.odds);
+  return parseFloat((sortedByOdds[0].odds * sortedByOdds[1].odds).toFixed(2));
+}
+
 export default function BettingApp() {
   const [currentView, setCurrentView] = useState<AppView>("landing");
   const [activePlayer, setActivePlayer] = useState<string>("Vlado");
   const [allBets, setAllBets] = useState<AllPlayersData>({
     Vlado: [], Fika: [], Labud: [], Ilija: [], Dzoni: [],
   });
+  const [jokerGrants, setJokerGrants] = useState<JokerGrant[]>([]);
   const [session, setSession] = useState<any>(null);
   const [appLoading, setAppLoading] = useState(true);
 
   // 👇 1. LIFTED STATE: The main app now controls the calendar date
   const [selectedDate, setSelectedDate] = useState<Date>(new Date());
 
+  // Admin Joker form state
+  const [jokerPlayer, setJokerPlayer] = useState<string>(PLAYERS[0]);
+  const [jokerDate, setJokerDate] = useState<string>(new Date().toLocaleDateString("en-CA"));
+  const [jokerSaving, setJokerSaving] = useState(false);
+
   // 🎵 LIFTED LEADER AUDIO STATE (iOS PWA gesture-safe)
   const leaderAudioRef = useRef<HTMLAudioElement | null>(null);
+  const audioCtxRef = useRef<AudioContext | null>(null);
   const [isLeaderMusicPlaying, setIsLeaderMusicPlaying] = useState(false);
 
   const viewHistory = useRef<AppView[]>(["landing"]);
 
-  // Compute current #1 leader using the 2/2 multiplied odds rule
+  const isAdmin = session?.user?.email === ADMIN_EMAIL;
+
+  const unlockIosMediaChannel = () => {
+    try {
+      if ("audioSession" in navigator) {
+        (navigator as any).audioSession.type = "playback";
+      }
+      const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+      if (AudioCtx) {
+        if (!audioCtxRef.current) {
+          audioCtxRef.current = new AudioCtx();
+        }
+        if (audioCtxRef.current.state === "suspended") {
+          audioCtxRef.current.resume();
+        }
+        const buffer = audioCtxRef.current.createBuffer(1, 1, 22050);
+        const source = audioCtxRef.current.createBufferSource();
+        source.buffer = buffer;
+        source.connect(audioCtxRef.current.destination);
+        source.start(0);
+      }
+    } catch {
+      // Ignore if called outside gesture
+    }
+  };
+
+  // Compute current #1 leader using best-2-of-3 won odds rule
   const currentLeader = useMemo(() => {
     let topPlayer = "";
     let topScore = 0;
@@ -65,9 +117,7 @@ export default function BettingApp() {
       const rows = allBets[player] || [];
       let score = 0;
       rows.forEach(r => {
-        if (r.match1?.status === "win" && r.match2?.status === "win") {
-          score += r.match1.odds * r.match2.odds;
-        }
+        score += calculateRowScore(r);
       });
       const rounded = parseFloat(score.toFixed(2));
       if (rounded > topScore) {
@@ -93,10 +143,13 @@ export default function BettingApp() {
     const meta = LEADER_SONGS[target];
     if (!meta?.song) return;
 
+    unlockIosMediaChannel();
+
     if (!leaderAudioRef.current) {
       leaderAudioRef.current = new Audio(meta.song);
       leaderAudioRef.current.loop = true;
       leaderAudioRef.current.volume = 0.7;
+      (leaderAudioRef.current as any).playsInline = true;
       leaderAudioRef.current.onended = () => setIsLeaderMusicPlaying(false);
     } else if (!leaderAudioRef.current.src.endsWith(meta.song)) {
       leaderAudioRef.current.src = meta.song;
@@ -110,7 +163,6 @@ export default function BettingApp() {
       });
     }
 
-    // Must be called synchronously inside the user's tap handler for iOS PWA
     leaderAudioRef.current
       .play()
       .then(() => setIsLeaderMusicPlaying(true))
@@ -127,8 +179,9 @@ export default function BettingApp() {
   };
 
   const navigateToView = (nextView: AppView) => {
+    if (nextView === "admin" && !isAdmin) return;
+
     if (nextView === "leaderboard") {
-      // Trigger playback right inside the click event (e.g. if navigated from LandingPage)
       playLeaderMusic();
     } else {
       stopLeaderMusic();
@@ -154,15 +207,55 @@ export default function BettingApp() {
     }
   };
 
-  // Cleanup audio on unmount
+  // Pre-cache all leader anthems in Cache Storage
+  useEffect(() => {
+    if (typeof window === "undefined" || !("caches" in window)) return;
+
+    const cacheAnthems = async () => {
+      try {
+        const cache = await caches.open("leader-anthems-v1");
+        const urls = Object.values(LEADER_SONGS).map(s => s.song);
+        await Promise.all(
+          urls.map(async url => {
+            const existing = await cache.match(url);
+            if (!existing) {
+              const res = await fetch(url, { cache: "force-cache" });
+              if (res.ok) await cache.put(url, res);
+            }
+          })
+        );
+      } catch (err) {
+        console.warn("Audio precache skipped:", err);
+      }
+    };
+
+    cacheAnthems();
+  }, []);
+
+  // Cleanup audio & AudioContext on unmount
   useEffect(() => {
     return () => {
       if (leaderAudioRef.current) {
         leaderAudioRef.current.pause();
         leaderAudioRef.current = null;
       }
+      if (audioCtxRef.current) {
+        audioCtxRef.current.close().catch(() => {});
+        audioCtxRef.current = null;
+      }
     };
   }, []);
+
+  const fetchJokerGrants = async () => {
+    const { data, error } = await supabase
+      .from("joker_grants")
+      .select("id, player_name, grant_date")
+      .order("grant_date", { ascending: false });
+
+    if (!error && data) {
+      setJokerGrants(data);
+    }
+  };
 
   const fetchBetsData = async () => {
     const { data: betsData } = await supabase
@@ -183,7 +276,7 @@ export default function BettingApp() {
       setAppLoading(true);
       const { data: { session: existing } } = await supabase.auth.getSession();
       setSession(existing);
-      await fetchBetsData();
+      await Promise.all([fetchBetsData(), fetchJokerGrants()]);
       setAppLoading(false);
     };
 
@@ -193,7 +286,7 @@ export default function BettingApp() {
     return () => subscription.unsubscribe();
   }, []);
 
-  // 👇 2. THE SMART CALENDAR LOGIC
+  // 👇 2. THE SMART CALENDAR LOGIC (respects 3rd pick when joker is granted)
   useEffect(() => {
     if (!allBets[activePlayer]) return;
 
@@ -214,8 +307,17 @@ export default function BettingApp() {
       const dateString = `${year}-${month}-${day}`;
 
       const rowForDay = playerRows.find(r => r.date === dateString);
+      const hasJoker =
+        Boolean(rowForDay?.hasJoker) ||
+        jokerGrants.some(g => g.player_name === activePlayer && g.grant_date === dateString);
 
-      if (!rowForDay || rowForDay.match1.status === "empty" || rowForDay.match2.status === "empty") {
+      const missingRequired =
+        !rowForDay ||
+        rowForDay.match1?.status === "empty" ||
+        rowForDay.match2?.status === "empty" ||
+        (hasJoker && (!rowForDay.match3 || rowForDay.match3.status === "empty"));
+
+      if (missingRequired) {
         targetDate = new Date(checkDate);
         break;
       }
@@ -224,11 +326,11 @@ export default function BettingApp() {
     }
 
     setSelectedDate(targetDate);
-  }, [activePlayer, allBets]);
+  }, [activePlayer, allBets, jokerGrants]);
 
   const handleRefresh = async () => {
     if (navigator.vibrate) navigator.vibrate(50);
-    await fetchBetsData();
+    await Promise.all([fetchBetsData(), fetchJokerGrants()]);
   };
 
   const savePlayerToDb = async (playerName: string, rows: BettingRow[]) => {
@@ -239,19 +341,80 @@ export default function BettingApp() {
     if (error) console.error("Error saving:", error);
   };
 
+  const handleGrantJoker = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!isAdmin || jokerSaving) return;
+
+    setJokerSaving(true);
+    const { error } = await supabase
+      .from("joker_grants")
+      .upsert(
+        { player_name: jokerPlayer, grant_date: jokerDate },
+        { onConflict: "player_name,grant_date" }
+      );
+
+    if (error) {
+      alert("Greška pri dodjeli jokera: " + error.message);
+    } else {
+      // Ensure the target player's row has match3 slot initialized if it already exists
+      setAllBets(prev => {
+        const rows = prev[jokerPlayer] ? [...prev[jokerPlayer]] : [];
+        const idx = rows.findIndex(r => r.date === jokerDate);
+        if (idx !== -1) {
+          const updatedRow: BettingRow = {
+            ...rows[idx],
+            hasJoker: true,
+            match3: rows[idx].match3 ?? { ...EMPTY_MATCH },
+          };
+          rows[idx] = updatedRow;
+          savePlayerToDb(jokerPlayer, rows);
+          return { ...prev, [jokerPlayer]: rows };
+        }
+        return prev;
+      });
+      await fetchJokerGrants();
+    }
+    setJokerSaving(false);
+  };
+
+  const handleRevokeJoker = async (grant: JokerGrant) => {
+    if (!isAdmin) return;
+    await supabase.from("joker_grants").delete().eq("id", grant.id);
+    await fetchJokerGrants();
+  };
+
   const addPick = (date: string, sport: string, matchName: string, tip: string, odds: number) => {
     const newMatch: Match = { sport, name: matchName, tip, odds, status: "pending" };
+    const hasJoker = jokerGrants.some(g => g.player_name === activePlayer && g.grant_date === date);
+
     setAllBets(prev => {
       const rows = prev[activePlayer] ? [...prev[activePlayer]] : [];
       const idx = rows.findIndex(r => r.date === date);
       if (idx !== -1) {
-        const row = { ...rows[idx] };
-        if (row.match1.status === "empty") row.match1 = newMatch;
-        else if (row.match2.status === "empty") row.match2 = newMatch;
-        else { alert("Maximum 2 picks per day allowed!"); return prev; }
+        const row: BettingRow = {
+          ...rows[idx],
+          ...(hasJoker ? { hasJoker: true, match3: rows[idx].match3 ?? { ...EMPTY_MATCH } } : {}),
+        };
+        if (row.match1.status === "empty") {
+          row.match1 = newMatch;
+        } else if (row.match2.status === "empty") {
+          row.match2 = newMatch;
+        } else if ((hasJoker || row.hasJoker) && (!row.match3 || row.match3.status === "empty")) {
+          row.hasJoker = true;
+          row.match3 = newMatch;
+        } else {
+          alert(hasJoker || row.hasJoker ? "Maksimalno 3 para na Joker tiketu!" : "Maksimalno 2 para dnevno!");
+          return prev;
+        }
         rows[idx] = row;
       } else {
-        rows.push({ id: Date.now(), date, match1: newMatch, match2: { ...EMPTY_MATCH } });
+        rows.push({
+          id: Date.now(),
+          date,
+          match1: newMatch,
+          match2: { ...EMPTY_MATCH },
+          ...(hasJoker ? { hasJoker: true, match3: { ...EMPTY_MATCH } } : {}),
+        });
         rows.sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
       }
       savePlayerToDb(activePlayer, rows);
@@ -259,13 +422,14 @@ export default function BettingApp() {
     });
   };
 
-  const toggleStatus = (date: string, matchKey: "match1" | "match2") => {
+  const toggleStatus = (date: string, matchKey: "match1" | "match2" | "match3") => {
     setAllBets(prev => {
       const rows = prev[activePlayer].map(row => {
-        if (row.date === date && row[matchKey].status !== "empty") {
-          const s = row[matchKey].status;
+        const target = row[matchKey];
+        if (row.date === date && target && target.status !== "empty") {
+          const s = target.status;
           const next = s === "pending" ? "win" : s === "win" ? "loss" : "pending";
-          return { ...row, [matchKey]: { ...row[matchKey], status: next } };
+          return { ...row, [matchKey]: { ...target, status: next } };
         }
         return row;
       });
@@ -289,7 +453,6 @@ export default function BettingApp() {
   };
 
   const handleLeaderboardTabClick = async () => {
-    // 🎵 Start playback synchronously BEFORE awaiting fetchBetsData so iOS keeps the user-gesture token!
     playLeaderMusic();
     await fetchBetsData();
     if (currentView !== "leaderboard") {
@@ -325,9 +488,116 @@ export default function BettingApp() {
 
   if (!session) return <Login onLogin={() => { }} />;
 
+  const renderAdminPanel = () => (
+    <div className="min-h-screen flex flex-col font-sans text-white p-4 md:p-8 max-w-2xl mx-auto space-y-6">
+      <div className="text-center pt-2">
+        <div className="flex items-center justify-center gap-3 mb-1">
+          <div className="h-px w-8 bg-gradient-to-r from-transparent to-yellow-400/50" />
+          <span className="text-[10px] font-black text-yellow-300/80 uppercase tracking-[0.35em]">🃏 Admin Kontrola</span>
+          <div className="h-px w-8 bg-gradient-to-l from-transparent to-yellow-400/50" />
+        </div>
+        <h1 className="wc-shine-text text-3xl md:text-4xl font-black uppercase tracking-tight">
+          Dodijeli 3. Par
+        </h1>
+        <p className="text-[10px] font-bold text-white/50 uppercase tracking-widest mt-1">
+          Računaju se najveće 2 pogođene kvote (2/3 ili 3/3)
+        </p>
+      </div>
+
+      <form
+        onSubmit={handleGrantJoker}
+        className="p-5 rounded-2xl space-y-4 backdrop-blur-md shadow-xl"
+        style={{
+          background: 'linear-gradient(155deg, rgba(0, 24, 82, 0.75) 0%, rgba(1, 10, 34, 0.90) 100%)',
+          border: '1px solid rgba(255, 204, 0, 0.25)',
+        }}
+      >
+        <div>
+          <label className="block text-[9px] font-black uppercase tracking-widest text-yellow-300/80 mb-2">
+            Izaberi igrača
+          </label>
+          <div className="grid grid-cols-5 gap-1.5">
+            {PLAYERS.map(p => (
+              <button
+                key={p}
+                type="button"
+                onClick={() => setJokerPlayer(p)}
+                className={`py-2 rounded-xl text-[10px] font-black uppercase tracking-wider border transition-all cursor-pointer ${
+                  jokerPlayer === p
+                    ? "bg-yellow-400 text-[#020a24] border-yellow-300 shadow-md"
+                    : "bg-black/40 text-white/60 border-white/10 hover:text-white"
+                }`}
+              >
+                {p}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div>
+          <label className="block text-[9px] font-black uppercase tracking-widest text-yellow-300/80 mb-1.5">
+            Datum tiketa
+          </label>
+          <input
+            type="date"
+            value={jokerDate}
+            onChange={e => setJokerDate(e.target.value)}
+            className="w-full min-w-0 max-w-full box-border appearance-none h-[40px] rounded-xl px-3 text-xs font-bold text-white outline-none block"
+            style={{ background: "rgba(0, 8, 28, 0.75)", border: "1px solid rgba(255, 204, 0, 0.2)", colorScheme: "dark" }}
+          />
+        </div>
+
+        <button
+          type="submit"
+          disabled={jokerSaving}
+          className="w-full h-[42px] rounded-xl font-black text-xs uppercase tracking-[0.2em] text-[#020a24] transition-all hover:brightness-110 active:scale-[0.98] cursor-pointer"
+          style={{ background: "linear-gradient(135deg, #ffcc00 0%, #eab308 100%)" }}
+        >
+          {jokerSaving ? "Čuvanje..." : `🃏 ODOBRI 3. PAR ZA ${jokerPlayer.toUpperCase()}`}
+        </button>
+      </form>
+
+      <div className="space-y-2.5">
+        <h3 className="text-[10px] font-black uppercase tracking-[0.25em] text-yellow-300/60 px-1">
+          Aktivni i raniji jokeri
+        </h3>
+        {jokerGrants.length === 0 ? (
+          <div className="p-6 text-center text-xs text-white/35 rounded-2xl bg-black/30 border border-white/5">
+            Još nema dodijeljenih jokera.
+          </div>
+        ) : (
+          jokerGrants.map(g => (
+            <div
+              key={g.id}
+              className="flex items-center justify-between px-4 py-3 rounded-xl"
+              style={{ background: "rgba(0, 12, 42, 0.75)", border: "1px solid rgba(255, 204, 0, 0.16)" }}
+            >
+              <div className="flex items-center gap-3">
+                <span className="text-base">🃏</span>
+                <div>
+                  <span className="text-xs font-black uppercase text-white block">{g.player_name}</span>
+                  <span className="text-[10px] font-bold text-yellow-300/70 tabular-nums">
+                    {g.grant_date.split("-").reverse().join(".")}
+                  </span>
+                </div>
+              </div>
+              <button
+                onClick={() => handleRevokeJoker(g)}
+                className="px-2.5 py-1 rounded-lg bg-red-500/15 border border-red-400/30 text-red-300 text-[9px] font-black uppercase tracking-wider cursor-pointer hover:bg-red-500 hover:text-white transition-all"
+              >
+                Ukloni
+              </button>
+            </div>
+          ))
+        )}
+      </div>
+    </div>
+  );
+
   const renderTabShell = () => {
     switch (currentView) {
-      case "landing": return <LandingPage onNavigate={navigateToView} />;
+      case "landing":
+        return <LandingPage onNavigate={navigateToView} />;
       case "leaderboard":
         return (
           <Leaderboard
@@ -340,7 +610,10 @@ export default function BettingApp() {
             }}
           />
         );
-      case "statistics": return <Statistics allBets={allBets} onBack={navigateBack} />;
+      case "statistics":
+        return <Statistics allBets={allBets} onBack={navigateBack} />;
+      case "admin":
+        return isAdmin ? renderAdminPanel() : <LandingPage onNavigate={navigateToView} />;
       case "tables":
       default:
         return (
@@ -353,6 +626,7 @@ export default function BettingApp() {
             userEmail={session.user.email}
             selectedDate={selectedDate}
             setSelectedDate={setSelectedDate}
+            jokerGrants={jokerGrants}
           />
         );
     }
@@ -363,6 +637,7 @@ export default function BettingApp() {
     { id: "landing",     label: "Meni",       icon: "🏠", onClick: () => navigateToView("landing") },
     { id: "leaderboard", label: "Podijum",    icon: "🏆", onClick: handleLeaderboardTabClick },
     { id: "statistics",  label: "Statistika", icon: "📊", onClick: () => navigateToView("statistics") },
+    ...(isAdmin ? [{ id: "admin" as AppView, label: "Joker", icon: "🃏", onClick: () => navigateToView("admin") }] : []),
   ];
 
   return (
