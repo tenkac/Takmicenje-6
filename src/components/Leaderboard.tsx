@@ -251,7 +251,6 @@ export default function Leaderboard({ allBets, onPlayerClick, isPlaying, onToggl
               {first && first.score > 0 && (
                 <button
                   type="button"
-                  onClick={onToggleMusic}
                   className="mt-3 inline-flex items-center gap-2 px-4 py-1.5 rounded-full text-[10px] font-black uppercase tracking-[0.2em] transition-all hover:brightness-110 active:scale-95 cursor-pointer"
                   style={{
                     background: isPlaying
