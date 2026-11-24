@@ -1,0 +1,545 @@
+"use client";
+import { useEffect, useState, useMemo } from 'react';
+import { AllPlayersData, PLAYERS } from '../types';
+// 👇 1. IMPORT SUPABASE TO FETCH PREDICTIONS
+import { supabase } from '../lib/supabase';
+
+interface Props {
+  allBets: AllPlayersData;
+  onPlayerClick: (playerName: string) => void;
+}
+
+const PLAYER_THEMES: Record<string, { text: string, border: string, icon: string, hex: string }> = {
+  "Vlado":  { text: "text-blue-500",   border: "border-blue-500",   icon: "/Avatars/vlado.webp",  hex: "#3b82f6" },
+  "Fika":   { text: "text-red-500",    border: "border-red-500",    icon: "/Avatars/fika.webp",   hex: "#ef4444" },
+  "Labud":  { text: "text-green-500",  border: "border-green-500",  icon: "/Avatars/labud.webp",  hex: "#22c55e" },
+  "Ilija":  { text: "text-purple-500", border: "border-purple-500", icon: "/Avatars/ilija.webp",  hex: "#a855f7" },
+  "Dzoni":  { text: "text-yellow-500", border: "border-yellow-500", icon: "/Avatars/dzoni.webp",  hex: "#eab308" },
+};
+
+// 👇 HELPER: Reliably extracts only the flag emoji whether it's at the beginning or end of the string
+const getFlag = (team: string) => {
+  if (!team) return "";
+  const parts = team.trim().split(' ');
+  return parts.find(p => !/[a-zA-ZžŽćĆčČđĐšŠ]/.test(p)) || parts[0] || team;
+};
+
+export default function Leaderboard({ allBets, onPlayerClick }: Props) {
+  const [mounted, setMounted] = useState(false);
+  
+  // 👇 2. STATE FOR PREDICTIONS
+  const [predictionsData, setPredictionsData] = useState<any[]>([]);
+
+  useEffect(() => {
+    // Fetch all locked predictions for the leaderboard calculation
+    const fetchPredictions = async () => {
+      const { data } = await supabase.from('wc_predictions').select('player, predictions');
+      if (data) setPredictionsData(data);
+    };
+    fetchPredictions();
+
+    const t = setTimeout(() => setMounted(true), 50);
+    return () => clearTimeout(t);
+  }, []);
+
+  const { playerStats, biggestOdd, mostWins, playerGroupHits, playerSemiHits, totalGroupSlots, hasAnyGroupResults } = useMemo(() => {
+    // ========================================================================
+    // 🏆 REAL RESULTS CONFIGURATION (UPDATE THIS WHEN THE TOURNAMENT HAPPENS)
+    // ========================================================================
+    const REAL_RESULTS = {
+      groups: {
+        A: ["🇲🇽 Meksiko", "🇿🇦 Južna Afrika", "🇰🇷 Južna Koreja", "🇨🇿 Češka"],
+        B: ["🇨🇭 Švajcarska", "🇨🇦 Kanada", "🇧🇦 Bosna i Hercegovina", "🇶🇦 Katar"],
+        C: ["🇧🇷 Brazil", "🇲🇦 Maroko", "🏴󠁧󠁢󠁳󠁣󠁴󠁿 Škotska", "🇭🇹 Haiti"],
+        D: ["🇺🇸 SAD", "🇦🇺 Australija", "🇵🇾 Paragvaj", "🇹🇷 Turska"],
+        E: ["🇩🇪 Njemačka", "🇨🇮 Obala Slonovače", "🇪🇨 Ekvador", "🇨🇼 Kurasao"],
+        F: ["🇳🇱 Holandija", "🇯🇵 Japan", "🇸🇪 Švedska", "🇹🇳 Tunis"],
+        G: ["🇧🇪 Belgija", "🇪🇬 Egipat", "🇮🇷 Iran", "🇳🇿 Novi Zeland"],
+        H: ["🇪🇸 Španija", "🇨🇻 Zelenortska Ostrva", "🇺🇾 Urugvaj", "🇸🇦 Saudijska Arabija"],
+        I: ["🇫🇷 Francuska", "🇳🇴 Norveška", "🇸🇳 Senegal", "🇮🇶 Irak"],
+        J: ["🇦🇷 Argentina", "🇦🇹 Austrija", "🇩🇿 Alžir", "🇯🇴 Jordan"],
+        K: ["🇨🇴 Kolumbija", "🇵🇹 Portugal", "🇨🇩 DR Kongo", "🇺🇿 Uzbekistan"],
+        L: ["🏴󠁧󠁢󠁥󠁮󠁧󠁿 Engleska", "🇭🇷 Hrvatska", "🇬🇭 Gana", "🇵🇦 Panama"],
+      } as Record<string, string[]>,
+      semis: [
+        "🇪🇸 Španija",
+        "🇫🇷 Francuska",
+        "🏴󠁧󠁢󠁥󠁮󠁧󠁿 Engleska",
+        "🇦🇷 Argentina"
+             ] as string[], 
+      winner: "",            
+      goldenBoot: ""         
+    };
+
+    // Upgraded normalize: strips emojis/symbols so matching works even if emoji placement differs
+    const normalize = (s: string) => s?.replace(/[^a-zžćčđš]/gi, '').toLowerCase() || "";
+
+    const playerGroupHits: Record<string, number> = {};
+    const playerSemiHits: Record<string, string[]> = {};
+    let hasAnyGroupResults = false;
+    let totalGroupSlots = 0; // number of group positions that actually have results
+
+    Object.keys(REAL_RESULTS.groups).forEach(gLetter => {
+      if (REAL_RESULTS.groups[gLetter].length === 4) totalGroupSlots += 4;
+    });
+
+    predictionsData.forEach(user => {
+      let hits = 0;
+      Object.keys(REAL_RESULTS.groups).forEach(gLetter => {
+        const realGroup = REAL_RESULTS.groups[gLetter];
+        const predGroup = user.predictions.groups?.[gLetter] || [];
+        if (realGroup.length === 4) {
+          hasAnyGroupResults = true;
+          for(let i = 0; i < 4; i++) {
+            if (normalize(predGroup[i]) === normalize(realGroup[i])) hits++;
+          }
+        }
+      });
+      playerGroupHits[user.player] = hits;
+    });
+
+    // 🥇 TIERED GROUP POINTS: best hit-count = 3, 2nd = 1.5, 3rd = 0.5.
+    // Players tied on the same hit-count share the same tier (and same points).
+    const GROUP_TIER_POINTS = [3, 1.5, 0.5];
+    const distinctHits = [...new Set(Object.values(playerGroupHits))]
+      .filter(h => h > 0)            // 0 correct picks earns nothing
+      .sort((a, b) => b - a);
+    const groupPointsByHits: Record<number, number> = {};
+    distinctHits.forEach((h, i) => {
+      if (i < GROUP_TIER_POINTS.length) groupPointsByHits[h] = GROUP_TIER_POINTS[i];
+    });
+
+    let biggestOdd = { player: "---", odds: 0, match: "No Wins Yet" };
+    let mostWins   = { player: "---", count: 0 };
+
+    const playerStats = PLAYERS.map(player => {
+      const rows = allBets[player] || [];
+      let totalScore = 0, winCount = 0, pendingCount = 0;
+      const allMatches = rows.flatMap(r => [r.match1, r.match2]);
+
+      allMatches.forEach(m => {
+        if (m.status === 'win') {
+          totalScore += m.odds;
+          winCount++;
+          if (m.odds > biggestOdd.odds) biggestOdd = { player, odds: m.odds, match: m.name };
+        }
+        if (m.status === 'pending') pendingCount++;
+      });
+
+      const userPredRow = predictionsData.find(p => p.player === player);
+      let predictionPoints = 0;
+      const correctSemis: string[] = [];
+
+      if (userPredRow && userPredRow.predictions) {
+         const preds = userPredRow.predictions;
+         
+         preds.semis?.forEach((team: string) => {
+           if (team && REAL_RESULTS.semis.map(normalize).includes(normalize(team))) {
+             predictionPoints += 0.5;
+             correctSemis.push(team);
+           }
+         });
+         
+         if (preds.winner && normalize(preds.winner) === normalize(REAL_RESULTS.winner)) predictionPoints += 2;
+         if (preds.goldenBoot && normalize(preds.goldenBoot) === normalize(REAL_RESULTS.goldenBoot)) predictionPoints += 2;
+
+         if (hasAnyGroupResults) {
+           predictionPoints += groupPointsByHits[playerGroupHits[player]] || 0;
+         }
+      }
+
+      playerSemiHits[player] = correctSemis;
+      totalScore += predictionPoints;
+
+      if (winCount > mostWins.count) mostWins = { player, count: winCount };
+
+      const recentForm = allMatches
+        .filter(m => m.status === 'win' || m.status === 'loss')
+        .slice(-5).reverse();
+
+      return { 
+        name: player, 
+        score: parseFloat(totalScore.toFixed(2)), 
+        form: recentForm, 
+        pendingCount, 
+        predictionPoints,
+        correctSemis
+      };
+    }).sort((a, b) => b.score - a.score);
+
+    return { playerStats, biggestOdd, mostWins, playerGroupHits, playerSemiHits, totalGroupSlots, hasAnyGroupResults };
+  }, [allBets, predictionsData]); 
+
+  const [first, second, third, ...chasers] = playerStats;
+
+  const gapTo = (
+    target:    typeof playerStats[0] | undefined,
+    reference: typeof playerStats[0] | undefined,
+  ) => {
+    if (!target || !reference) return null;
+    const diff = parseFloat((reference.score - target.score).toFixed(2));
+    return diff > 0 ? diff : null;
+  };
+
+  return (
+    <>
+      <style>{`
+        @keyframes podium-rise {
+          from { transform: translateY(60px); opacity: 0; }
+          to   { transform: translateY(0);    opacity: 1; }
+        }
+        @keyframes avatar-drop {
+          0%   { transform: translateY(-40px) scale(0.8); opacity: 0; }
+          70%  { transform: translateY(4px) scale(1.05);  opacity: 1; }
+          100% { transform: translateY(0) scale(1);        opacity: 1; }
+        }
+        @keyframes crown-pulse {
+          0%, 100% { transform: scale(1) rotate(-5deg);  filter: drop-shadow(0 0 4px rgba(250,204,21,0.4)); }
+          50%       { transform: scale(1.25) rotate(5deg); filter: drop-shadow(0 0 12px rgba(250,204,21,0.9)); }
+        }
+        .crown-anim { animation: crown-pulse 2s ease-in-out infinite; display: inline-block; }
+      `}</style>
+
+      <div
+        className="min-h-screen p-4 md:p-8 font-sans text-white relative overflow-hidden"
+        style={{ background: 'linear-gradient(165deg, #05091a 0%, #080d20 45%, #040810 100%)' }}
+      >
+        <div className="fixed inset-0 wc-jersey-bg pointer-events-none" />
+        <div className="fixed inset-0 pointer-events-none overflow-hidden">
+          <div className="wc-beam-l absolute" style={{ top: 0, left: '18%', width: '240px', height: '65vh', background: 'linear-gradient(178deg, rgba(250,204,21,0.14) 0%, transparent 80%)', transformOrigin: 'top center', filter: 'blur(42px)' }} />
+          <div className="wc-beam-r absolute" style={{ top: 0, right: '18%', width: '240px', height: '65vh', background: 'linear-gradient(178deg, rgba(250,204,21,0.14) 0%, transparent 80%)', transformOrigin: 'top center', filter: 'blur(42px)' }} />
+          <div style={{ position: 'absolute', top: '-70px', left: '50%', transform: 'translateX(-50%)', width: '650px', height: '420px', background: 'radial-gradient(ellipse at top, rgba(250,204,21,0.06) 0%, transparent 65%)' }} />
+          <div style={{ position: 'absolute', bottom: 0, left: '50%', transform: 'translateX(-50%)', width: '80vw', height: '28vh', background: 'radial-gradient(ellipse at bottom, rgba(34,197,94,0.05) 0%, transparent 70%)' }} />
+        </div>
+        <div className="fixed inset-0 pointer-events-none select-none overflow-hidden">
+          <span className="wc-float      absolute text-5xl" style={{ opacity: 0.05, top: '18%',    left: '2%'  }}>⚽</span>
+          <span className="wc-float-slow absolute text-8xl" style={{ opacity: 0.04, bottom: '15%', right: '1%' }}>⚽</span>
+          <span className="wc-float-med  absolute text-3xl" style={{ opacity: 0.06, top: '50%',    right: '4%' }}>⚽</span>
+        </div>
+
+        {/* ── CENTERED TOP HEADER BAR ── */}
+        <div className="relative z-10 flex justify-center items-center mb-8">
+          <div className="text-center">
+            <h2 className="text-sm font-bold text-yellow-400 uppercase tracking-widest">WORLD CUP 2026</h2>
+            <h1 className="text-2xl md:text-4xl font-black italic uppercase tracking-tighter">Podijum</h1>
+          </div>
+        </div>
+
+        <div className="max-w-4xl mx-auto relative z-10">
+
+          {/* PODIUM */}
+          <div className="flex justify-center items-end gap-2 md:gap-6 mb-4 min-h-[350px] pb-4">
+            {second && (
+              <PodiumItem rank={2} data={second} theme={PLAYER_THEMES[second.name]}
+                height="h-48 md:h-64" color="border-gray-300" badge="🥈"
+                gapToAbove={gapTo(second, first)} mounted={mounted} delay="0.15s"
+                onClick={() => onPlayerClick(second.name)} />
+            )}
+            {first && (
+              <PodiumItem rank={1} data={first} theme={PLAYER_THEMES[first.name]}
+                height="h-60 md:h-80" color="border-yellow-400" badge="👑" isWinner
+                mounted={mounted} delay="0s" onClick={() => onPlayerClick(first.name)} />
+            )}
+            {third && (
+              <PodiumItem rank={3} data={third} theme={PLAYER_THEMES[third.name]}
+                height="h-40 md:h-52" color="border-orange-600" badge="🥉"
+                gapToAbove={gapTo(third, second)} mounted={mounted} delay="0.25s"
+                onClick={() => onPlayerClick(third.name)} />
+            )}
+          </div>
+
+          {/* ACHIEVEMENTS */}
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-8">
+            <div className="flex items-center gap-4 p-4 rounded-2xl relative overflow-hidden flex-grow"
+              style={{ background: 'linear-gradient(135deg, rgba(168,85,247,0.15) 0%, rgba(0,0,0,0.5) 100%)', border: '1px solid rgba(168,85,247,0.25)' }}>
+              <div className="absolute top-0 right-0 p-4 opacity-10 text-6xl rotate-12 select-none">🎯</div>
+              <div className="w-12 h-12 rounded-full border-2 border-purple-500 overflow-hidden shrink-0 z-10 bg-gray-900">
+                {biggestOdd.player !== "---" && <img src={PLAYER_THEMES[biggestOdd.player].icon} className="w-full h-full object-cover" alt="" />}
+              </div>
+              <div className="z-10">
+                <div className="text-[10px] font-bold text-purple-400 uppercase tracking-widest">Sniper Sezone</div>
+                <div className="text-xl font-black uppercase italic">{biggestOdd.player}</div>
+                <div className="text-xs text-gray-400 truncate max-w-[200px]">{biggestOdd.match}</div>
+              </div>
+              <div className="ml-auto text-right z-10">
+                <div className="text-3xl font-black text-purple-400">{biggestOdd.odds.toFixed(2)}</div>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-4 p-4 rounded-2xl relative overflow-hidden"
+              style={{ background: 'linear-gradient(135deg, rgba(34,197,94,0.15) 0%, rgba(0,0,0,0.5) 100%)', border: '1px solid rgba(34,197,94,0.25)' }}>
+              <div className="absolute top-0 right-0 p-4 opacity-10 text-6xl rotate-12 select-none">🔥</div>
+              <div className="w-12 h-12 rounded-full border-2 border-green-500 overflow-hidden shrink-0 z-10 bg-gray-900">
+                {mostWins.player !== "---" && <img src={PLAYER_THEMES[mostWins.player].icon} className="w-full h-full object-cover" alt="" />}
+              </div>
+              <div className="z-10">
+                <div className="text-[10px] font-bold text-green-400 uppercase tracking-widest">Hasler</div>
+                <div className="text-xl font-black uppercase italic">{mostWins.player}</div>
+                <div className="text-xs text-gray-400">Konstantni Performans</div>
+              </div>
+              <div className="ml-auto text-right z-10">
+                <div className="text-3xl font-black text-green-400">{mostWins.count}</div>
+                <div className="text-[8px] uppercase font-bold tracking-widest text-green-600">Ubodenih</div>
+              </div>
+            </div>
+          </div>
+
+          {/* CHASERS */}
+          <div className="flex flex-col gap-3 pb-8">
+            <div className="text-xs font-bold text-gray-500 uppercase tracking-widest mb-2 pl-2">Jahači</div>
+            {chasers.map((rank, index) => {
+              const pt  = PLAYER_THEMES[rank.name];
+              const gap = gapTo(rank, playerStats[index + 2]);
+              return (
+                <div
+                  key={rank.name}
+                  onClick={() => onPlayerClick(rank.name)}
+                  className="flex items-center p-4 rounded-2xl hover:scale-[1.01] cursor-pointer transition-all"
+                  style={{ background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)' }}
+                >
+                  <div className="w-8 text-xl font-black text-gray-500 italic">#{index + 4}</div>
+                  <div className={`w-12 h-12 rounded-full border-2 ${pt.border} overflow-hidden mx-4 bg-gray-900`}>
+                    <img src={pt.icon} alt={rank.name} className="w-full h-full object-cover" />
+                  </div>
+                  <div className="flex-grow">
+                    <div className={`text-lg font-black uppercase tracking-tight ${pt.text}`}>{rank.name}</div>
+                    <div className="flex items-center gap-2 mt-1">
+                      <div className="flex gap-1">
+                        {rank.form.map((p: any, i: number) => (
+                          <div key={i} className={`w-1.5 h-1.5 rounded-full ${p.status === 'win' ? 'bg-green-500' : 'bg-red-500'}`} />
+                        ))}
+                      </div>
+                      {gap !== null && (
+                        <span className="text-[9px] font-bold text-gray-600 uppercase tracking-wider">-{gap} pts</span>
+                      )}
+                    </div>
+                  </div>
+                  <div className="text-right flex flex-col items-end gap-1">
+                    <span className="block text-2xl font-black text-white">{rank.score.toFixed(2)}</span>
+                    <div className="flex items-center gap-1.5 flex-wrap justify-end">
+                      {rank.correctSemis && rank.correctSemis.length > 0 && (
+                         <span className="text-[9px] font-bold text-blue-400 uppercase tracking-widest bg-blue-500/10 px-1.5 py-0.5 rounded border border-blue-500/20 flex items-center gap-1">
+                           1/2: {rank.correctSemis.map((t: string) => getFlag(t)).join(' ')}
+                         </span>
+                      )}
+                      {rank.predictionPoints > 0 && (
+                         <span className="text-[9px] font-bold text-purple-400 uppercase tracking-widest">+{rank.predictionPoints} Prognoze</span>
+                      )}
+                      {rank.pendingCount > 0 && (
+                        <span className="text-[9px] font-bold text-orange-400 uppercase tracking-widest">{rank.pendingCount} pending</span>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+
+          {/* ── GROUP-STAGE & SEMIFINAL PREDICTION ACCURACY ── */}
+          <div className="flex flex-col gap-3 pb-10">
+            <div className="flex items-baseline justify-between mb-2 px-2">
+              <div className="text-xs font-bold text-gray-500 uppercase tracking-widest">Grupna Faza & Polufinalisti</div>
+              <div className="text-[9px] font-bold text-gray-600 uppercase tracking-widest flex items-center gap-2">
+                <span>{totalGroupSlots > 0 ? `Grupe · maks ${totalGroupSlots}` : 'Rezultati još nisu uneti'}</span>
+                <span>·</span>
+                <span>1/2 Finale (0.5 pts)</span>
+              </div>
+            </div>
+
+            <div
+              className="rounded-2xl p-4 md:p-5 flex flex-col gap-4"
+              style={{ background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)' }}
+            >
+              {(() => {
+                const ranked = PLAYERS
+                  .map(name => ({ 
+                    name, 
+                    hits: playerGroupHits[name] || 0,
+                    semis: playerSemiHits[name] || []
+                  }))
+                  .sort((a, b) => b.hits - a.hits);
+                const scaleMax = Math.max(1, ...ranked.map(r => r.hits));
+                return ranked.map(({ name, hits, semis }, idx) => {
+                  const pt = PLAYER_THEMES[name];
+                  const pct = Math.round((hits / scaleMax) * 100);
+                  return (
+                    <div key={name} className="flex items-center gap-3">
+                      <div className="w-4 text-[11px] font-black text-gray-600 italic text-center shrink-0">{idx + 1}</div>
+                      <div className={`w-9 h-9 rounded-full border-2 ${pt.border} overflow-hidden shrink-0 bg-gray-900`}>
+                        <img src={pt.icon} alt={name} className="w-full h-full object-cover" />
+                      </div>
+                      <div className="flex-grow min-w-0">
+                        <div className="flex items-center justify-between mb-1">
+                          <span className={`text-xs font-black uppercase tracking-tight ${pt.text}`}>{name}</span>
+                          <span className="text-[11px] font-black text-white tabular-nums">
+                            {hits}
+                            {totalGroupSlots > 0 && <span className="text-gray-600 font-bold">/{totalGroupSlots}</span>}
+                          </span>
+                        </div>
+                        <div className="w-full h-2 rounded-full overflow-hidden" style={{ background: 'rgba(255,255,255,0.06)' }}>
+                          <div
+                            className="h-full rounded-full"
+                            style={{
+                              width: mounted ? `${pct}%` : '0%',
+                              background: `linear-gradient(90deg, ${pt.hex}66, ${pt.hex})`,
+                              boxShadow: hits > 0 ? `0 0 10px ${pt.hex}55` : 'none',
+                              transition: 'width 0.8s cubic-bezier(0.22,1,0.36,1)',
+                            }}
+                          />
+                        </div>
+                      </div>
+
+                      {/* ⚽ NEW: SEMIFINALISTS GRAPHIC PILL NEXT TO THE BAR */}
+                      <div 
+                        className="shrink-0 flex items-center gap-1.5 bg-gradient-to-r from-blue-500/10 to-purple-500/10 border border-blue-500/20 px-2.5 py-1 rounded-xl shadow-inner"
+                        title={`Pogođeni polufinalisti: ${semis.length > 0 ? semis.join(', ') : 'Nema'}`}
+                      >
+                        <span className="text-[9px] font-black text-blue-400 uppercase tracking-wider">1/2 F:</span>
+                        <div className="flex items-center gap-1 min-w-[48px] justify-end">
+                          {semis.length > 0 ? (
+                            semis.map((team: string, i: number) => (
+                              <span 
+                                key={i} 
+                                title={team}
+                                className="text-xs md:text-sm hover:scale-125 transition-transform cursor-help inline-block filter drop-shadow-[0_0_4px_rgba(59,130,246,0.5)]"
+                              >
+                                {getFlag(team)}
+                              </span>
+                            ))
+                          ) : (
+                            <span className="text-[10px] text-gray-600 font-bold w-full text-center">–</span>
+                          )}
+                        </div>
+                      </div>
+
+                    </div>
+                  );
+                });
+              })()}
+
+              {!hasAnyGroupResults && (
+                <div className="text-center text-[10px] text-gray-600 uppercase tracking-widest pt-1">
+                  Bar grafikon se puni kako stižu rezultati grupa
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+
+        {/* TICKER */}
+        <div className="relative z-10 w-full overflow-hidden py-2" style={{ borderTop: '1px solid rgba(255,255,255,0.05)', background: 'rgba(0,0,0,0.3)' }}>
+          <div className="wc-ticker whitespace-nowrap inline-block">
+            {[0, 1].map(i => (
+              <span key={i} className="text-[10px] font-black uppercase tracking-[0.3em] text-yellow-400/20 px-2">
+                🏆&nbsp; WORLD CUP 2026 &nbsp;·&nbsp; PODIJUM &nbsp;·&nbsp; KO JE ŠAMPION &nbsp;·&nbsp; RANG LISTA &nbsp;·&nbsp; KICK OFF JUNI 2026 &nbsp;·&nbsp; TAKMIČENJE EDITION &nbsp;·&nbsp;
+              </span>
+            ))}
+          </div>
+        </div>
+      </div>
+    </>
+  );
+}
+
+function PodiumItem({ rank, data, theme, height, color, badge, isWinner = false, gapToAbove, mounted, delay, onClick }: any) {
+  return (
+    <div
+      onClick={onClick}
+      className="flex flex-col items-center group w-1/3 max-w-[140px] md:max-w-none cursor-pointer"
+      style={{ animation: mounted ? `podium-rise 0.6s cubic-bezier(0.22,1,0.36,1) ${delay} both` : 'none', opacity: mounted ? undefined : 0 }}
+    >
+      <div
+        className={`flex flex-col items-center mb-8 md:mb-14 ${isWinner ? 'scale-110 md:scale-125' : 'scale-90 md:scale-100'}`}
+        style={{ animation: mounted ? `avatar-drop 0.55s cubic-bezier(0.22,1,0.36,1) calc(${delay} + 0.2s) both` : 'none', opacity: mounted ? undefined : 0 }}
+      >
+        <div className={`text-2xl md:text-4xl mb-[-10px] z-20 drop-shadow-lg ${isWinner ? 'crown-anim' : ''}`}>{badge}</div>
+        <div className={`w-16 h-16 md:w-24 md:h-24 rounded-full border-4 ${color} shadow-2xl overflow-hidden relative z-10 bg-gray-900`}>
+          <img src={theme.icon} alt={data.name} className="w-full h-full object-cover group-hover:scale-110 transition-transform duration-300" />
+        </div>
+        <div className={`mt-3 text-sm md:text-xl font-black uppercase tracking-widest ${theme.text} bg-black/60 px-3 py-1 rounded-lg backdrop-blur-sm border border-white/10 shadow-lg`}>
+          {data.name}
+        </div>
+      </div>
+
+      <div
+        className={`w-full ${height} rounded-t-2xl border-x border-t relative flex flex-col justify-start items-center pt-4 backdrop-blur-sm hover:scale-[1.02] transition-transform`}
+        style={isWinner ? {
+          background: 'linear-gradient(to top, rgba(161,120,6,0.2), rgba(234,179,8,0.05))',
+          borderColor: 'rgba(234,179,8,0.5)',
+          boxShadow: '0 0 30px rgba(234,179,8,0.1)',
+        } : {
+          background: `linear-gradient(to top, ${theme.hex}18, ${theme.hex}05)`,
+          borderColor: `${theme.hex}40`,
+          boxShadow: `0 0 25px ${theme.hex}15`,
+        }}
+      >
+        <AnimatedScore target={data.score} isWinner={isWinner} mounted={mounted} delay={delay} />
+        <span className="text-[10px] md:text-xs font-bold text-white/30 uppercase tracking-[0.2em] mb-2">Poena</span>
+        
+        {/* ⚽ NEW: SEMIFINALISTS PODIUM INDICATOR */}
+        {data.correctSemis && data.correctSemis.length > 0 && (
+          <div className="mb-1.5 px-2 py-0.5 bg-blue-500/20 border border-blue-500/30 rounded-full flex items-center gap-1 shadow-[0_0_10px_rgba(59,130,246,0.2)] z-10 max-w-[95%]">
+            <span className="text-[8px] md:text-[9px] font-black text-blue-300 uppercase tracking-widest shrink-0">1/2:</span>
+            <div className="flex gap-1 text-[10px] md:text-xs leading-none">
+              {data.correctSemis.map((team: string, idx: number) => (
+                <span key={idx} title={team} className="cursor-help hover:scale-125 transition-transform inline-block">
+                  {getFlag(team)}
+                </span>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {data.predictionPoints > 0 && (
+          <div className="mb-2 px-2 py-0.5 bg-purple-500/20 border border-purple-500/30 rounded-full flex items-center shadow-[0_0_10px_rgba(168,85,247,0.2)] z-10">
+            <span className="text-[8px] md:text-[9px] font-black text-purple-300 uppercase tracking-widest">+{data.predictionPoints} Prognoze</span>
+          </div>
+        )}
+
+        {gapToAbove !== null && gapToAbove !== undefined && (
+          <div className="mb-2 px-2 py-0.5 bg-black/40 border border-white/10 rounded-full z-10">
+            <span className="text-[8px] md:text-[10px] font-black text-gray-500 uppercase tracking-widest">-{gapToAbove} pts</span>
+          </div>
+        )}
+
+        <div className="flex gap-1.5 p-2 bg-black/40 rounded-full border border-white/5 mt-auto mb-4 z-10">
+          {data.form.map((p: any, i: number) => (
+            <div key={i} className={`w-2 h-2 md:w-3 md:h-3 rounded-full shadow-lg ${p.status === 'win' ? 'bg-green-400 shadow-[0_0_8px_rgba(74,222,128,0.6)]' : 'bg-red-500'}`} />
+          ))}
+          {data.form.length === 0 && <span className="text-[8px] text-gray-600 px-1">–</span>}
+        </div>
+
+        <div className="absolute inset-0 flex items-center justify-center text-7xl md:text-9xl font-black select-none pointer-events-none"
+          style={{ opacity: 0.08, color: isWinner ? '#eab308' : theme.hex }}>
+          {rank}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function AnimatedScore({ target, isWinner, mounted, delay }: { target: number, isWinner: boolean, mounted: boolean, delay: string }) {
+  const [display, setDisplay] = useState(0);
+
+  useEffect(() => {
+    if (!mounted) { setDisplay(0); return; }
+    const delayMs = parseFloat(delay) * 1000 + 300;
+    const timer = setTimeout(() => {
+      const steps = 40, interval = 900 / steps;
+      let step = 0;
+      const id = setInterval(() => {
+        step++;
+        const eased = 1 - Math.pow(1 - step / steps, 3);
+        setDisplay(parseFloat((target * eased).toFixed(2)));
+        if (step >= steps) { setDisplay(target); clearInterval(id); }
+      }, interval);
+    }, delayMs);
+    return () => clearTimeout(timer);
+  }, [target, mounted, delay]);
+
+  return (
+    <span className={`text-3xl md:text-5xl font-black tracking-tighter tabular-nums ${isWinner ? 'text-yellow-400 drop-shadow-[0_0_10px_rgba(250,204,21,0.5)]' : 'text-white'}`}>
+      {display.toFixed(2)}
+    </span>
+  );
+}
