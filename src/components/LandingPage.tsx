@@ -3,7 +3,7 @@ import React, { useEffect } from 'react';
 import { supabase } from '../lib/supabase';
 
 interface Props {
-  onNavigate: (view: "landing" | "leaderboard" | "tables" | "statistics" | "predictor") => void;
+  onNavigate: (view: "landing" | "leaderboard" | "tables" | "statistics") => void;
 }
 
 const DICE_SRC = '/Kockabezzvijezda.webp';

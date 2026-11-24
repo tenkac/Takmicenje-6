@@ -22,13 +22,13 @@ export const viewport: Viewport = {
 
 //  UPDATED METADATA FOR PWA AND IOS
 export const metadata: Metadata = {
-  title: "Takmičenje 5",
-  description: "Takmičenje 5.0 • World Cup 2026 Edicija",
+  title: "Kocka",
+  description: "Takmičenje 6.0",
   manifest: "/manifest.json", // Tells the browser this is an app
   appleWebApp: {
     capable: true, // Enables the standalone full-screen mode on iOS
     statusBarStyle: "black-translucent",
-    title: "Takmičenje 5", // Name shown on the iPhone home screen
+    title: "Kocka", // Name shown on the iPhone home screen
   },
   icons: {
     apple: "/icon-192x192.png", // Make sure this image is inside your public folder!
