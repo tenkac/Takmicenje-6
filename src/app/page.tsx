@@ -47,7 +47,7 @@ function EuStarRing({ className, fontSize = 9 }: { className?: string; fontSize?
 }
 
 // Helper: evaluates 2-pick or 3-pick ("best 2 won odds") ticket score
-export function calculateRowScore(row: BettingRow): number {
+function calculateRowScore(row: BettingRow): number {
   const candidates = [row.match1, row.match2, row.match3].filter(
     (m): m is Match => Boolean(m && m.status === "win")
   );
